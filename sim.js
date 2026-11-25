@@ -1,9 +1,50 @@
-// pure game simulation + ai. no dom, so it also runs under node.
-export const W = 960, H = 540, GROUND = 460;
-export const NET_X = 480, NET_HW = 5, NET_TOP = 378;
-export const SLIME_R = 46, BALL_R = 14, DT = 1 / 120;
+// Shared, deterministic game simulation and CPU controllers.
+import {W, H, GROUND, NET_X, NET_HW, NET_TOP, SLIME_R, BALL_R, DT} from './court.js';
+import {kickoff, playSoccer, soccerThink} from './soccer.js';
+export {W, H, GROUND, NET_X, NET_HW, NET_TOP, SLIME_R, BALL_R, DT, GOAL_TOP} from './court.js';
 export const HOME = [300, 660];
 export const WIN_SCORE = 7;
+export const REPLAY_LEAD = 0.4, REPLAY_RATE = 0.45, REPLAY_IMPACT = 0.38;
+const REPLAY_FRAMES = 35;
+// History stays local to the simulation. Only a scoring highlight travels over the wire.
+const histories = new WeakMap();
+
+function replayFrame(st) {
+  const {ball, slimes: [a, b]} = st;
+  return [Math.round(st.time / DT), Math.round(ball.x), Math.round(ball.y), +ball.fire,
+    Math.round(a.x), Math.round(a.y), Math.round(b.x), Math.round(b.y)];
+}
+
+function captureRally(st) {
+  const tick = Math.round(st.time / DT);
+  if (tick % 4 || st.highlights === false) return;
+  let frames = histories.get(st);
+  if (!frames) histories.set(st, frames = []);
+  frames.push(replayFrame(st));
+  if (frames.length > REPLAY_FRAMES) frames.shift();
+}
+
+function scoringReplay(st, scorer, speed) {
+  const frames = histories.get(st);
+  if (!frames || frames.length < 9) return {};
+  const ball = st.ball;
+  let highlight;
+  if (st.sport === 'soccer') {
+    if (st.exchanges >= 6) highlight = 'rally';
+    else if (st.lastHitter === scorer && (speed >= 830 || (speed >= 560 && Math.abs(ball.x - st.lastKick) > W / 2))) highlight = 'fire';
+  } else if (st.lastHitter === scorer && st.lastNet != null && st.time - st.lastNet < 1 && Math.abs(ball.x - NET_X) < 90) highlight = 'net';
+  else if (st.exchanges >= 10) highlight = 'rally';
+  else if (ball.fire && st.lastHitter === scorer && speed >= 780 &&
+      (Math.min(ball.x, W - ball.x) < 60 || Math.abs(ball.x - st.slimes[1 - scorer].x) < 85)) highlight = 'fire';
+  if (!highlight) return {};
+  const impact = replayFrame(st);
+  if (frames.at(-1)[0] === impact[0]) frames.pop();
+  return {highlight, replay: [...frames, impact]};
+}
+
+export function replayDuration(frames) {
+  return (frames.at(-1)[0] - frames[0][0]) * DT / REPLAY_RATE + REPLAY_LEAD + REPLAY_IMPACT;
+}
 
 const MOVE = 340, JUMP = 640, SLIME_G = 1950, DIVE = 1000;
 const BALL_G = 900, MIN_POP = 520, REST = 0.78, CARRY = 0.5;
@@ -15,39 +56,42 @@ const mk = i => ({ x: HOME[i], y: GROUND, vx: 0, vy: 0, speed: 1, dive: false })
 
 export function createMatch(o = {}) {
   const st = {
+    sport: o.sport === 'soccer' ? 'soccer' : 'volleyball',
     slimes: [mk(0), mk(1)],
     ball: { x: 0, y: 0, vx: 0, vy: 0, fire: false },
     score: [0, 0], streak: [0, 0],
     phase: 'serve', timer: 0, server: o.server ?? 0,
     rally: 0, seq: 0, time: 0, winner: -1, win: o.win ?? WIN_SCORE, events: [],
   };
+  if (o.highlights === false) st.highlights = false;
   serve(st);
   return st;
 }
 
 function serve(st) {
   const b = st.ball;
-  b.x = HOME[st.server]; b.y = 175; b.vx = b.vy = 0; b.fire = false;
-  st.phase = 'serve'; st.timer = 0.9; st.rally = 0; st.seq++;
-  st.lastHitter = -1; st.exchanges = 0;
+  if (st.sport === 'soccer') kickoff(st);
+  else { b.x = HOME[st.server]; b.y = 175; b.vx = b.vy = 0; b.fire = false; }
+  st.replaying = false; st.phase = 'serve'; st.timer = 0.9; st.rally = 0; st.seq++;
+  st.lastHitter = -1; st.exchanges = 0; st.lastNet = null;
+  histories.delete(st);
 }
 
-function moveSlime(st, i, inp) {
-  const s = st.slimes[i];
+export function moveSlime(s, i, inp, events, sport) {
   s.vx = ((inp.r || 0) - (inp.l || 0)) * MOVE * s.speed;
   const air = s.y < GROUND;
-  if (!air && inp.u) { s.vy = -JUMP; ev(st, 'jump', { side: i }); }
+  if (!air && inp.u) { s.vy = -JUMP; events?.push({ type: 'jump', side: i }); }
   if (air || s.vy < 0) {
     s.vy += SLIME_G * DT;
     if (air && inp.d && s.vy < DIVE) { s.vy = DIVE; s.dive = true; }
   }
   s.x += s.vx * DT; s.y += s.vy * DT;
   if (s.y >= GROUND) {
-    if (air) ev(st, 'land', { side: i, hard: s.dive });
+    if (air) events?.push({ type: 'land', side: i, hard: s.dive });
     s.y = GROUND; s.vy = 0; s.dive = false;
   }
-  const lo = i ? NET_X + NET_HW + SLIME_R : SLIME_R;
-  const hi = i ? W - SLIME_R : NET_X - NET_HW - SLIME_R;
+  const lo = i && sport !== 'soccer' ? NET_X + NET_HW + SLIME_R : SLIME_R;
+  const hi = i || sport === 'soccer' ? W - SLIME_R : NET_X - NET_HW - SLIME_R;
   if (s.x < lo) s.x = lo; else if (s.x > hi) s.x = hi;
 }
 
@@ -92,7 +136,10 @@ function bounce(b, s, nx, ny, fire) {
 
 export function step(st, inp) {
   st.time += DT;
-  moveSlime(st, 0, inp[0]); moveSlime(st, 1, inp[1]);
+  if (!(st.phase === 'point' && st.replaying) && !(st.sport === 'soccer' && st.phase === 'serve')) {
+    moveSlime(st.slimes[0], 0, inp[0], st.events, st.sport);
+    moveSlime(st.slimes[1], 1, inp[1], st.events, st.sport);
+  }
   if (st.phase === 'over') return;
   if (st.phase === 'serve') {
     if ((st.timer -= DT) <= 0) { st.phase = 'play'; ev(st, 'serve', { side: st.server }); }
@@ -102,12 +149,22 @@ export function step(st, inp) {
     if ((st.timer -= DT) <= 0) {
       const s = st.server;
       if (st.score[s] >= st.win) { st.phase = 'over'; st.winner = s; ev(st, 'over', { winner: s }); }
-      else serve(st);
+      else {
+        if (st.sport === 'soccer') st.server = 1 - s;
+        serve(st);
+      }
     }
+    return;
+  }
+  if (st.sport === 'soccer') {
+    const scorer = playSoccer(st);
+    captureRally(st);
+    if (scorer >= 0) awardPoint(st, scorer, false);
     return;
   }
   const b = st.ball;
   const w = ballFree(b, DT);
+  if (w === 'net') st.lastNet = b.y <= NET_TOP + NET_HW ? st.time : null;
   if (w) ev(st, w, { x: b.x, y: b.y, speed: Math.hypot(b.vx, b.vy) });
   for (let i = 0; i < 2; i++) {
     const s = st.slimes[i], dx = b.x - s.x, dy = b.y - s.y;
@@ -119,20 +176,29 @@ export function step(st, inp) {
     const fire = st.streak[i] >= 3;
     if (bounce(b, s, nx, ny, fire)) {
       if (st.lastHitter >= 0 && st.lastHitter !== i) st.exchanges++;
-      st.lastHitter = i;
+      st.lastNet = null; st.lastHitter = i;
       st.rally++; st.seq++; b.fire = fire;
       ev(st, 'hit', { side: i, x: s.x + nx * SLIME_R, y: s.y + ny * SLIME_R, speed: Math.hypot(b.vx, b.vy), fire });
     }
   }
+  captureRally(st);
   if (b.y + BALL_R >= GROUND) {
     b.y = GROUND - BALL_R;
-    const s = b.x < NET_X ? 1 : 0, o = 1 - s, broke = st.streak[o];
-    const ace = s === st.server && st.rally === 1 && st.lastHitter === s;
-    const pointKind = broke >= 3 ? 'streak' : st.exchanges >= 6 ? 'rally' : ace ? 'ace' : 'ordinary';
-    st.score[s]++; st.streak[s]++; st.streak[o] = 0; st.server = s;
-    st.phase = 'point'; st.timer = 1.5;
-    ev(st, 'point', { scorer: s, pointKind, x: b.x, speed: Math.hypot(b.vx, b.vy), rally: st.rally, broke, fire: b.fire });
+    const scorer = b.x < NET_X ? 1 : 0;
+    const ace = scorer === st.server && st.rally === 1 && st.lastHitter === scorer;
+    awardPoint(st, scorer, ace);
   }
+}
+
+function awardPoint(st, s, ace) {
+  const b = st.ball, o = 1 - s, broke = st.streak[o];
+  const pointKind = broke >= 3 ? 'streak' : st.exchanges >= 6 ? 'rally' : ace ? 'ace' : 'ordinary';
+  st.score[s]++; st.streak[s]++; st.streak[o] = 0; st.server = s;
+  const speed = Math.hypot(b.vx, b.vy);
+  const replay = scoringReplay(st, s, speed);
+  st.replaying = !!replay.highlight;
+  st.phase = 'point'; st.timer = st.replaying ? replayDuration(replay.replay) : 1.5;
+  ev(st, 'point', { scorer: s, pointKind, ...replay, x: b.x, y: b.y, speed, rally: st.rally, broke, fire: b.fire });
 }
 
 // ---------- ai ----------
@@ -217,6 +283,7 @@ export function makeBrain(kind) {
 }
 
 export function think(st, side, br) {
+  if (st.sport === 'soccer') return soccerThink(st, side, br, moveSlime);
   const c = br.cfg, m = side === 1, me = st.slimes[side], op = st.slimes[1 - side];
   const fx = x => (m ? x : W - x);
   const mx = fx(me.x), ox = fx(op.x), sb = st.ball;

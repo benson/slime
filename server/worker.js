@@ -36,8 +36,10 @@ export default {
         'Access-Control-Max-Age': '600', Vary: 'Origin',
       } });
     }
-    let room, action;
+    let room, action, sport;
     if (url.pathname === '/rooms' && request.method === 'POST') {
+      sport = url.searchParams.get('sport') || 'volleyball';
+      if (sport !== 'volleyball' && sport !== 'soccer') return json({ error: 'Unknown sport.' }, 400, origin);
       room = crypto.randomUUID(); action = 'create';
     } else {
       const parts = ROOM_PATH.exec(url.pathname);
@@ -52,6 +54,7 @@ export default {
     internal.pathname = '/' + action;
     internal.search = '';
     internal.searchParams.set('room', room);
+    if (sport) internal.searchParams.set('sport', sport);
     return stub.fetch(internal, { method: request.method, headers: request.headers });
   },
 };
@@ -64,6 +67,8 @@ export class VolleyballRoom {
     this.ready = [false, false];
     this.rematch = [false, false];
     this.inputs = [neutral(), neutral()];
+    this.inputSequence = [0, 0];
+    this.appliedInput = [null, null];
     this.pulses = [neutral(), neutral()];
     this.frame = null;
     this.monitor = null;
@@ -77,7 +82,7 @@ export class VolleyballRoom {
     const room = url.searchParams.get('room');
     if (url.pathname === '/create' && !this.room) {
       const token = crypto.randomUUID(), now = Date.now();
-      this.room = { tokens: [token, null], joinKey: null, match: null, expires: now + ROOM_LIFE, emptyUntil: now + EMPTY_LIFE };
+      this.room = { sport: url.searchParams.get('sport') || 'volleyball', tokens: [token, null], joinKey: null, match: null, expires: now + ROOM_LIFE, emptyUntil: now + EMPTY_LIFE };
       await this.persist();
       await this.scheduleExpiry();
       return json({ room, token }, 201, origin);
@@ -176,7 +181,7 @@ export class VolleyballRoom {
         }
       }
     }, 5000);
-    this.send(socket, { type: 'welcome', side });
+    this.send(socket, { type: 'welcome', side, sport: this.room.sport || 'volleyball' });
     this.reconcile();
     if (this.room.match) this.send(socket, this.snapshot());
   }
@@ -197,6 +202,8 @@ export class VolleyballRoom {
 
   clearInput(side) {
     this.inputs[side] = neutral();
+    this.inputSequence[side] = 0;
+    this.appliedInput[side] = null;
     this.pulses[side] = neutral();
   }
 
@@ -207,7 +214,7 @@ export class VolleyballRoom {
     const wire = JSON.stringify(data);
     for (const socket of this.sockets) if (socket?.readyState === 1) socket.send(wire);
   }
-  snapshot(events = []) { return { type: 'state', state: this.room.match, events }; }
+  snapshot(events = []) { return { type: 'state', state: this.room.match, events, inputAck: this.appliedInput }; }
   phase() {
     if (this.room.match?.phase === 'over') return 'finished';
     if (this.sockets.every(Boolean) && this.ready.every(Boolean)) return 'playing';
@@ -229,6 +236,7 @@ export class VolleyballRoom {
     const next = { l: amount(msg.l), r: amount(msg.r), u: msg.u === true, d: msg.d === true };
     for (const key of ['u','d']) if (next[key] && !this.inputs[side][key]) this.pulses[side][key] = true;
     this.inputs[side] = next;
+    if (Number.isSafeInteger(msg.seq) && msg.seq > 0) this.inputSequence[side] = msg.seq;
   }
 
   reconcile() {
@@ -245,7 +253,7 @@ export class VolleyballRoom {
       return;
     }
     if (this.frame) return;
-    if (!this.room.match) { this.room.match = createMatch(); this.persist(); }
+    if (!this.room.match) { this.room.match = createMatch({ sport: this.room.sport || 'volleyball' }); this.persist(); }
     this.lastTick = Date.now();
     this.remainder = 0;
     this.checkpoint = this.lastTick;
@@ -260,6 +268,8 @@ export class VolleyballRoom {
     const match = this.room.match;
     while (this.remainder >= DT && match.phase !== 'over') {
       const inputs = this.inputs.map((input,i) => {
+        const seq = this.inputSequence[i];
+        if (seq && seq !== this.appliedInput[i]?.seq) this.appliedInput[i] = { seq, at: match.time };
         const pulse = this.pulses[i];
         const result = { ...input, u: input.u || pulse.u, d: input.d || pulse.d };
         pulse.u = pulse.d = false;

@@ -34,6 +34,37 @@ const crest = lathe([[1,0],[0,1]],4,'#ffbe42');
 const lid = lathe([[1,0],[0.85,0.52],[0,1]],8);
 const ball = lathe(sphere,10,(i,j)=> ['#fff0c5','#ef8947','#50687b','#fff0c5','#fff0c5'][(i+j)%5]);
 
+// Truncating an icosahedron gives a football its twelve dark pentagons and twenty light hexagons.
+function footballMesh() {
+  const phi=(1+Math.sqrt(5))/2, vertices=[];
+  for (const a of [-1,1]) for (const b of [-phi,phi]) vertices.push([0,a,b],[a,b,0],[b,0,a]);
+  const dot=(a,b)=>a.reduce((sum,v,i)=>sum+v*b[i],0);
+  const cross=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
+  const unit=v=>v.map(x=>x/Math.hypot(...v));
+  const cut=(a,b)=>unit(a.map((v,i)=>2*v+b[i]));
+  const neighbors=vertices.map(a=>vertices.filter(b=>Math.abs(dot(a,b)-phi)<0.001));
+  const faces=[];
+  function face(points,color) {
+    const normal=unit(points.reduce((v,p)=>v.map((n,i)=>n+p[i]),[0,0,0]));
+    const u=unit(cross(normal,Math.abs(normal[2])<0.9 ? [0,0,1] : [0,1,0])), v=cross(normal,u);
+    const angle=p=>Math.atan2(dot(p,v),dot(p,u));
+    points.sort((a,b)=>angle(a)-angle(b));
+    for(let i=1;i<points.length-1;i++) faces.push([points[0],points[i],points[i+1],color]);
+  }
+  vertices.forEach((a,i)=>{
+    face(neighbors[i].map(b=>cut(a,b)), '#26303b');
+    neighbors[i].forEach(b=>{
+      const j=vertices.indexOf(b);
+      if(j<=i) return;
+      for(const c of neighbors[j]) if(vertices.indexOf(c)>j && neighbors[i].includes(c)) {
+        face([cut(a,b),cut(b,a),cut(b,c),cut(c,b),cut(c,a),cut(a,c)],'#fff0c5');
+      }
+    });
+  });
+  return faces;
+}
+const football=footballMesh();
+
 function addFaces(list, mesh, map, base, darken = 1, palette) {
   for (const [v1,v2,v3,ink] of mesh) {
     const [a,b,c] = [map(v1),map(v2),map(v3)];
@@ -73,9 +104,9 @@ export function slime(ctx,look,side,squash,char,aimX,aimY) {
   }
   paint(ctx,faces);
 }
-export function volleyball(ctx,r,angle,fire) {
+export function drawBall(ctx,r,angle,fire,soccer=false) {
   const faces=[], co=Math.cos(angle), si=Math.sin(angle);
   const palette = fire ? {'#fff0c5':'#ffe491','#ef8947':'#ff9b24','#50687b':'#de5830'} : null;
-  addFaces(faces,ball,([x,y,z])=>[(x*co-y*si)*r,(x*si+y*co)*r,z*r],null,1,palette);
+  addFaces(faces,soccer ? football : ball,([x,y,z])=>[(x*co-y*si)*r,(x*si+y*co)*r,z*r],null,1,palette);
   paint(ctx,faces);
 }

@@ -1,3 +1,5 @@
+import { LocalSlime } from './local-slime.js';
+
 const liveEndpoint = 'https://slime-volleyball-live.bensonperry.workers.dev';
 const isPreview = ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname) ||
   /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(location.hostname);
@@ -45,12 +47,15 @@ export class FriendRoom {
     this.detail = '';
     this.id = null;
     this.side = null;
+    this.sport = 'volleyball';
     this.players = { connected: [false, false], ready: [false, false], rematch: [false, false] };
     this.wantsReady = false;
     this.wantsRematch = false;
     this.closed = false;
     this.attempt = 0;
     this.abort = new AbortController();
+    this.prediction = new LocalSlime();
+    this.inputSequence = 0;
     this.visibility = () => document.hidden ? this.suspend() : this.resume();
     this.pageHide = () => this.suspend();
     this.pageShow = () => this.resume();
@@ -90,7 +95,8 @@ export class FriendRoom {
     return response.json();
   }
 
-  async create() {
+  async create(sport = 'volleyball') {
+    this.sport = sport;
     await this.open(null);
   }
 
@@ -112,7 +118,7 @@ export class FriendRoom {
           seat = { claim: newClaim() };
           saveSeat(id, seat);
         }
-        const result = await this.request(id ? '/rooms/'+id+'/join' : '/rooms', seat?.claim);
+        const result = await this.request(id ? '/rooms/'+id+'/join' : '/rooms?sport='+encodeURIComponent(this.sport), seat?.claim);
         if (this.closed) return;
         this.id = result.room;
         this.side = id ? 1 : 0;
@@ -156,6 +162,7 @@ export class FriendRoom {
       if (msg.type === 'welcome') {
         this.authenticated = true;
         this.side = msg.side;
+        this.sport = msg.sport || 'volleyball';
         this.attempt = 0;
         if (this.wantsReady) this.send({ type: 'ready' });
       } else if (msg.type === 'status') {
@@ -185,6 +192,10 @@ export class FriendRoom {
     const players = { connected: msg.connected, ready: msg.ready, rematch: msg.rematch };
     const changed = JSON.stringify(players) !== JSON.stringify(this.players);
     this.players = players;
+    if (msg.phase !== 'playing') {
+      this.prediction.reset();
+      this.lastInput = null;
+    }
     if (msg.phase === 'playing') {
       this.wantsRematch = false;
       this.setStatus('playing', '', changed);
@@ -199,22 +210,36 @@ export class FriendRoom {
     }
   }
 
-  receiveState({ state, events }) {
+  receiveState({ state, events, inputAck }) {
     const previous = this.state;
     this.previous = previous && state.time > previous.time && state.time - previous.time < 0.2 ? previous : null;
-    this.state = state;
+    const active = this.status === 'playing' && (state.phase === 'play' || (state.phase === 'serve' && state.sport !== 'soccer'));
     this.receivedAt = performance.now();
+    if (active && Array.isArray(inputAck)) {
+      if (!this.prediction.base || !this.previous || this.previous.phase === 'point' || this.previous.phase === 'over') {
+        this.prediction.reset();
+        this.lastInput = null;
+      }
+      this.prediction.reconcile(state, this.side, inputAck[this.side], this.receivedAt);
+    } else {
+      this.prediction.reset();
+    }
+    this.state = state;
     this.onSnapshot(state, events || []);
   }
 
   sample() {
     const state = this.state, prev = this.previous;
-    if (!state || !prev || this.status !== 'playing' || state.phase !== prev.phase) return state || null;
-    // Interpolate within one server tick; never advance a ball beyond an unconfirmed hit.
-    const interval = (state.time - prev.time) * 1000;
-    const t = Math.min(1, (performance.now() - this.receivedAt) / interval);
-    const blend = (a,b) => ({ ...b, x:a.x+(b.x-a.x)*t, y:a.y+(b.y-a.y)*t });
-    return { ...state, ball: blend(prev.ball,state.ball), slimes: state.slimes.map((s,i)=>blend(prev.slimes[i],s)) };
+    if (!state || this.status !== 'playing') return state || null;
+    const now = performance.now();
+    const own = this.prediction.sample(now);
+    const smooth = prev && state.phase === prev.phase;
+    if (!own && !smooth) return state;
+    // The ball and the other slime are always rendered from confirmed server snapshots.
+    const t = smooth ? Math.min(1, (now-this.receivedAt) / ((state.time-prev.time)*1000)) : 1;
+    const blend = (a,b) => t === 1 ? b : { ...b, x:a.x+(b.x-a.x)*t, y:a.y+(b.y-a.y)*t };
+    return { ...state, ball: blend(prev?.ball,state.ball), slimes: state.slimes.map((s,i)=>
+      i === this.side && own ? own : blend(prev?.slimes[i],s)) };
   }
 
   send(message) {
@@ -243,9 +268,12 @@ export class FriendRoom {
     if (last && next.u === last.u && next.d === last.d) {
       const unchanged = next.l === last.l && next.r === last.r;
       if (unchanged && now-this.lastSent < 500) return;
-      if (!unchanged && (next.l || next.r) && now-this.lastSent < 30) return;
+      const sameDirection = Math.sign(next.r-next.l) === Math.sign(last.r-last.l);
+      if (!unchanged && sameDirection && now-this.lastSent < 30) return;
     }
-    this.send({ type:'input', ...next });
+    const seq = ++this.inputSequence;
+    if (this.prediction.base) this.prediction.input(seq,next,now);
+    this.send({ type:'input', seq, ...next });
     this.lastSent = now;
     this.lastInput = next;
   }
@@ -257,6 +285,7 @@ export class FriendRoom {
     this.socket = null;
     this.authenticated = false;
     this.previous = null;
+    this.prediction.reset();
     if (ws) {
       ws.onmessage = ws.onclose = ws.onopen = null;
       ws.close();

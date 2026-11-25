@@ -1,8 +1,9 @@
-import {FriendRoom, roomFromLink, hasRoomSeat} from './friend-room.js';
+import {replayPose} from './replay.js';
+import {FriendRoom, roomFromLink, hasRoomSeat} from './friend-room.js?v=2';
 import {friendLobby} from './friend-lobby.js';
 import {startMusic} from './music.js';
-import {project, slime, volleyball} from './meshes.js?v=2';
-import * as S from './sim.js?v=5';
+import {project, slime, drawBall} from './meshes.js?v=3';
+import * as S from './sim.js?v=6';
 
 const { W, H, GROUND, NET_X, NET_TOP, NET_HW, SLIME_R: R, BALL_R: BR, DT } = S;
 const cv = document.getElementById('game'), ctx = cv.getContext('2d');
@@ -25,6 +26,15 @@ const OPP = [
 
 // ---------- state ----------
 let scene = 'title', mode = 'ladder', oppI = 0, quickI = 0, menuI = 0, sceneT = 0, T = 0, paused = false;
+let selectedSport = 'volleyball';
+try { if (localStorage.getItem('slime-sport') === 'soccer') selectedSport = 'soccer'; } catch {}
+function cycleSport() {
+  selectedSport = selectedSport === 'soccer' ? 'volleyball' : 'soccer';
+  try { localStorage.setItem('slime-sport', selectedSport); } catch {}
+  startDemo();
+  play('sel');
+}
+let replayClip = null, snapshotAt = 0;
 let match, brains = [null, null], looks = [YOU, OPP[0]];
 let acc = 0, timeScale = 1, slowT = 0, freeze = 0;
 let shake = 0, excite = 0, netWob = 0, spin = 0, fwT = 0;
@@ -37,7 +47,13 @@ let ac = null, master = null, crowd = null, noiseBuf = null, muted = false;
 const muteKey = 'slime-volleyball-2000_muted';
 try { muted = localStorage.getItem(muteKey) === '1'; } catch {}
 const voiceKey = 'slime-volleyball-2000_announcer';
-let voiceOn = true, voiceSource, musicGain;
+let voiceOn = true, musicGain;
+const speaking = new Set();
+const highlightShouts = ['holy', 'hell', 'damn'];
+const replayCalls = {
+  net: { scored: ['filthy', 'sauce'], conceded: ['past', 'blink'] },
+  fire: { scored: ['rocket', 'roof'], conceded: ['burn', 'pancake'] },
+};
 const callsByName = new Map();
 const scoringCalls = ['holy','hell','damn','rocket','roof','gravy','peel','filthy','pudding','sauce'];
 const concedingCalls = ['burn','pants','pancake','floor','ouch','tax','past','blink','stings','skid'];
@@ -50,15 +66,19 @@ const pointCalls = {
 const recentCalls = new Map();
 try { voiceOn = localStorage.getItem(voiceKey) !== 'off'; } catch {}
 function stopCall() {
-  if (voiceSource) { voiceSource.stop(); voiceSource = null; }
+  for (const source of speaking) source.stop();
+  speaking.clear();
+  if (musicGain) {
+    musicGain.gain.cancelScheduledValues(ac.currentTime);
+    musicGain.gain.setTargetAtTime(0.8, ac.currentTime, 0.12);
+  }
 }
 function toggleVoice() {
   voiceOn = !voiceOn;
   if (!voiceOn) stopCall();
   try { localStorage.setItem(voiceKey, voiceOn ? 'on' : 'off'); } catch {}
 }
-function announce(pool) {
-  if (!voiceOn || muted || !ac) return;
+function pickCall(pool) {
   const available = pool.filter(name => callsByName.has(name));
   if (!available.length) return;
   const history = recentCalls.get(pool) || [];
@@ -70,13 +90,30 @@ function announce(pool) {
   }
   const next = pick(remaining.length ? remaining : available);
   history.push(next); recentCalls.set(pool, history);
+  return callsByName.get(next);
+}
+function announcePoint(event, celebrate) {
+  if (!voiceOn || muted || !ac) return;
+  const perspective = celebrate ? 'scored' : 'conceded';
+  const specific = event.pointKind === 'ordinary' && replayCalls[event.highlight];
+  const pool = (specific || pointCalls[event.pointKind])[perspective];
+  const pools = event.highlight ? [highlightShouts, pool] : [pool];
+  const clips = pools.map(pickCall).filter(Boolean);
+  if (!clips.length) return;
   stopCall();
-  voiceSource = ac.createBufferSource(); voiceSource.buffer = callsByName.get(next);
-  voiceSource.connect(master); voiceSource.start();
   const t = ac.currentTime;
-  musicGain.gain.cancelScheduledValues(t);
+  let cursor = t;
+  for (const buffer of clips) {
+    const source = ac.createBufferSource();
+    source.buffer = buffer;
+    source.connect(master);
+    source.onended = () => { speaking.delete(source); source.disconnect(); };
+    speaking.add(source);
+    source.start(cursor);
+    cursor += buffer.duration + 0.07;
+  }
   musicGain.gain.setTargetAtTime(0.33,t,0.025);
-  musicGain.gain.setTargetAtTime(0.8,t+voiceSource.buffer.duration,0.12);
+  musicGain.gain.setTargetAtTime(0.8,cursor,0.12);
 }
 function audio() {
   if (ac) { if (ac.state === 'suspended') ac.resume(); return; }
@@ -182,7 +219,7 @@ function explode(x, y, p) {
   if (scorch.length > 24) scorch.shift();
   if (match) match.slimes.forEach((s, i) => {
     const d = Math.abs(s.x - x);
-    if (d < 190) { vis[i].char = 1.8; if (mode !== 'online' && s.y >= GROUND) s.vy = -(300 + (190 - d) * 2.2); }
+    if (d < 190) { vis[i].char = 1.8; if (mode !== 'online' && !match.replaying && s.y >= GROUND) s.vy = -(300 + (190 - d) * 2.2); }
   });
 }
 function firework(x, y) {
@@ -196,6 +233,8 @@ function say(text, delay = 0, size = 92) {
   calls.push({ text, t: -delay, dur: 1.25, size });
 }
 function resetFx() {
+  replayClip = null;
+  stopCall();
   P.length = later.length = scorch.length = calls.length = 0;
   shake = excite = slowT = freeze = acc = 0; timeScale = 1;
   vis.forEach(v => { v.w = v.wv = v.char = 0; });
@@ -282,7 +321,7 @@ function showRoom(status, detail = '') {
   roomMenu = false; scene = 'room'; clearInput();
   if (status === 'waiting') {
     const link = room.side === 0 && room.canShare ? room.inviteURL : '';
-    lobby.show('Play a friend', detail || 'Waiting for your friend…',
+    lobby.show(room.sport === 'soccer' ? 'Slime soccer' : 'Play a friend', detail || 'Waiting for your friend…',
       'Ready', room.wantsReady ? null : () => {
         audio(); fitMatchScreen(); room.ready();
         if (room.status === 'waiting') showRoom('waiting', detail);
@@ -295,10 +334,13 @@ function showRoom(status, detail = '') {
 }
 function enterRoom(id) {
   audio(); mode = 'online'; scene = 'room'; paused = roomMenu = false;
-  resetFx(); brains = [null,null]; looks = [P1,P2]; match = S.createMatch();
+  resetFx(); brains = [null,null]; looks = [P1,P2]; match = S.createMatch({sport: selectedSport});
   const session = new FriendRoom({
     onStatus(status, detail) {
       if (room !== session) return;
+      if (status === 'waiting' && !session.state && session.sport !== match.sport) {
+        match = S.createMatch({sport: session.sport});
+      }
       if (session.side === 0 || session.side === 1) {
         looks = [P1,P2].map((look,i)=>({...look, name:i === session.side ? 'YOU' : 'FRIEND'}));
       }
@@ -306,14 +348,15 @@ function enterRoom(id) {
     },
     onSnapshot(state, events) {
       if (room !== session) return;
-      match = state;
+      match = state; snapshotAt = performance.now();
+      if (state.phase !== 'point') replayClip = null;
       for (const ev of events || []) handle(ev);
       if (session.status === 'finished') showRoom('finished');
     }
   });
   room = session;
   showRoom('connecting');
-  (id ? session.join(id) : session.create()).catch(error => {
+  (id ? session.join(id) : session.create(selectedSport)).catch(error => {
     if (room === session) showRoom('error',error.message);
   });
 }
@@ -336,7 +379,7 @@ function startMatch() {
   if (scene === 'title') fitMatchScreen();
   const o = OPP[oppI];
   looks = mode === '2p' ? [P1, P2] : [YOU, o];
-  match = S.createMatch();
+  match = S.createMatch({sport: selectedSport});
   brains = [null, mode === '2p' ? null : S.makeBrain(o.id)];
   setSpeeds(); resetFx();
   scene = 'vs'; sceneT = 0; paused = false; menuI = 0;
@@ -344,7 +387,7 @@ function startMatch() {
 function startDemo() {
   const a = (Math.random() * 5) | 0, b = (a + 1 + ((Math.random() * 4) | 0)) % 5;
   looks = [OPP[a], OPP[b]];
-  match = S.createMatch();
+  match = S.createMatch({sport: selectedSport, highlights: false});
   brains = [S.makeBrain(OPP[a].id), S.makeBrain(OPP[b].id)];
   setSpeeds(); resetFx();
 }
@@ -358,7 +401,7 @@ const titleActs = [
   () => { mode = 'ladder'; oppI = 0; startMatch(); },
   () => { mode = 'quick'; oppI = quickI; startMatch(); },
   () => { mode = '2p'; startMatch(); },
-  () => enterRoom(null), toggleMute, toggleVoice,
+  () => enterRoom(null), toggleMute, toggleVoice, cycleSport,
 ];
 
 function handle(e) {
@@ -386,14 +429,16 @@ function handle(e) {
     case 'serve': play('whistle'); break;
     case 'point': {
       const pow = clamp(e.speed / 620, 0.75, 1.5) * (e.fire ? 1.2 : 1);
-      explode(e.x, GROUND, pow);
-      slowT = 0.5; play('boom', Math.min(1.3, pow)); cheer(0.16);
+      explode(e.x, match.sport === 'soccer' ? e.y : GROUND, pow);
+      replayClip = e.replay || null;
+      slowT = replayClip ? 0 : 0.5; play('boom', Math.min(1.3, pow)); cheer(e.highlight && !demo ? 0.23 : 0.16);
       if (demo) break;
       const celebrate = mode === '2p' || e.scorer === (mode === 'online' ? room.side : 0);
-      announce(pointCalls[e.pointKind][celebrate ? 'scored' : 'conceded']);
+      announcePoint(e, celebrate);
       play('point', celebrate, e);
       const k = match.streak[e.scorer];
-      if (e.pointKind === 'streak') say('EXTINGUISHED!', 0, 80);
+      if (match.sport === 'soccer') say('GOAL!');
+      else if (e.pointKind === 'streak') say('EXTINGUISHED!', 0, 80);
       else if (e.pointKind === 'rally') say('WHAT A RALLY!', 0, 80);
       else if (e.pointKind === 'ace') say('ACE!', 0, 110);
       else if (k === 3) say('ON FIRE!');
@@ -473,11 +518,12 @@ function txt(s, x, y, size, o = {}) {
   ctx.restore();
   return w;
 }
-function button(label, x, y, size, i, fn) {
+function button(label, x, y, size, i, fn, cycling = false) {
   const sel = menuI === i;
   const w = txt(label, x, y, size, { fill: sel ? '#ffd23a' : '#fff', alpha: sel ? 1 : 0.72, scale: sel ? 1.06 + Math.sin(T * 8) * 0.02 : 1 });
-  if (sel) { txt('▸', x - w / 2 - 26, y, size, { fill: '#ff5a12', skew: 0 }); txt('◂', x + w / 2 + 26, y, size, { fill: '#ff5a12', skew: 0 }); }
-  btns.push({ x: x - w / 2 - 40, y: y - size * 0.65, w: w + 80, h: size * 1.3, fn: () => { menuI = i; fn(); } });
+  if (sel && !cycling) { txt('▸', x - w / 2 - 26, y, size, { fill: '#ff5a12', skew: 0 }); txt('◂', x + w / 2 + 26, y, size, { fill: '#ff5a12', skew: 0 }); }
+  const height = cycling ? 52 : size * 1.3;
+  btns.push({ x: x - w / 2 - 40, y: y - height / 2, w: w + 80, h: height, fn: () => { menuI = i; fn(); } });
   return w;
 }
 
@@ -488,9 +534,10 @@ function polygon(g, color, points) {
   g.closePath(); g.fill();
 }
 
-const bg = document.createElement('canvas');
-bg.width = W / 2; bg.height = H / 2;
-(function drawArena(g) {
+function drawArena(soccer) {
+  const bg = document.createElement('canvas');
+  bg.width = W / 2; bg.height = H / 2;
+  const g = bg.getContext('2d');
   g.scale(0.5, 0.5);
   g.fillStyle = '#35395a'; g.fillRect(0, 0, W, H);
   // A low bank of dusk clouds behind the open end of the arena.
@@ -523,14 +570,61 @@ bg.width = W / 2; bg.height = H / 2;
   g.save(); g.translate(wallX,wallY); g.transform(1,(farY-wallY)/(farX-wallX),0,1,0,0);
   g.fillStyle='#202e41'; g.fillRect(-W,-25,3*W,28);
   g.font='17px '+FONT; g.textAlign='center'; g.fillStyle='#a5bbb6';
-  for(let i=0;i<4;i++) g.fillText('SLIME VOLLEYBALL 2000',(i+0.5)*(farX-wallX)/4,-6,190);
+  for(let i=0;i<4;i++) g.fillText(soccer ? 'SLIME SOCCER 2000' : 'SLIME VOLLEYBALL 2000',(i+0.5)*(farX-wallX)/4,-6,190);
   g.restore();
+  if (soccer) {
+    drawPitch(g);
+    return bg;
+  }
   floorFace(g,'#4a7c77',-1600,1600,-230,700);
   floorFace(g,'#5b9c8e',0,NET_X,-136,136);
   floorFace(g,'#508e83',NET_X,W,-136,136);
   for (const x of [0,NET_X,W-3]) floorFace(g,'#cfdbc2',x,x+3,-136,136);
   for (const z of [-136,133]) floorFace(g,'#cfdbc2',0,W,z,z+3);
-})(bg.getContext('2d'));
+  return bg;
+}
+const arenas = { volleyball: drawArena(false), soccer: drawArena(true) };
+function drawPitch(g) {
+  floorFace(g,'#426b56',-1600,1600,-230,700);
+  for (let i=0; i<8; i++) floorFace(g,i%2 ? '#508450' : '#578f58',i*W/8,(i+1)*W/8,-136,136);
+  const ink='#d5e1b8';
+  for (const z of [-136,133]) floorFace(g,ink,0,W,z,z+3);
+  for (const x of [0,NET_X-1.5,W-3]) floorFace(g,ink,x,x+3,-136,136);
+  for (const x of [0,W-116]) {
+    for (const z of [-80,77]) floorFace(g,ink,x,x+116,z,z+3);
+    const inner=x===0?113:x;
+    floorFace(g,ink,inner,inner+3,-80,80);
+  }
+  g.strokeStyle=ink; g.lineWidth=2.5; g.beginPath();
+  for (let i=0;i<=32;i++) {
+    const a=i*Math.PI/16, p=screen(NET_X+66*Math.cos(a),GROUND,66*Math.sin(a));
+    if (!i) g.moveTo(...p); else g.lineTo(...p);
+  }
+  g.stroke();
+  floorFace(g,ink,NET_X-4,NET_X+4,-4,4);
+}
+function drawGoals(front) {
+  const top = S.GOAL_TOP, z = 67;
+  function line(a,b,ink,width) {
+    ctx.strokeStyle=ink; ctx.lineWidth=width; ctx.beginPath();
+    ctx.moveTo(...screen(...a)); ctx.lineTo(...screen(...b)); ctx.stroke();
+  }
+  for (const x of [0,W]) {
+    const back=x+(x===0?-22:22), white='#f3eed5', grid='#859888';
+    if (!front) {
+      for(let d=-z;d<=z;d+=16) line([back,top,d],[back,GROUND,d],grid,1.5);
+      for(let y=top;y<=GROUND;y+=16) line([back,y,-z],[back,y,z],grid,1.5);
+      line([back,top,-z],[back,top,z],white,2);
+      line([x,top,-z],[x,GROUND,-z],white,4);
+      line([x,top,-z],[back,top,-z],white,3);
+    } else {
+      line([x,top,-z],[x,top,z],white,4);
+      line([x,top,z],[x,GROUND,z],white,4);
+      line([x,top,z],[back,top,z],white,3);
+      line([back,top,z],[back,GROUND,z],grid,2);
+    }
+  }
+}
 
 function screen(x,y,z=0) {
   const [u,v]=project(x-W/2,GROUND-y,z);
@@ -585,7 +679,7 @@ function drawImpact(mark) {
   if (age < 0.055 || mark.quiet) {
     if (age > 0.18) return;
     ctx.save(); ctx.translate(cx, cy - 6); ctx.scale(1.35, 0.52);
-    volleyball(ctx, BR, mark.angle, true); ctx.restore();
+    drawBall(ctx, BR, mark.angle, true, match.sport === 'soccer'); ctx.restore();
     return;
   }
   const t = (age - 0.055) / 0.795;
@@ -617,9 +711,10 @@ function drawImpact(mark) {
   }
   ctx.restore();
 }
-function drawWorld() {
-  ctx.drawImage(bg, 0, 0, W, H);
-  const m = match, b = m.ball;
+function drawWorld(replay) {
+  const soccer = match.sport === 'soccer';
+  ctx.drawImage(soccer ? arenas.soccer : arenas.volleyball, 0, 0, W, H);
+  const m = replay || match, b = m.ball;
   function shadow(x,r,ink) {
     const points=[];
     for(let i=0;i<12;i++) {
@@ -628,28 +723,34 @@ function drawWorld() {
     }
     polygon(ctx,ink,points);
   }
-  for(const s of scorch) shadow(s.x,s.r,'#446459');
+  const marks = replay ? scorch.slice(0, -1) : scorch;
+  for(const s of marks) shadow(s.x,s.r,'#446459');
   for(const s of m.slimes) shadow(s.x,R*(1-clamp((GROUND-s.y)/400,0,0.6)),'#396e66');
   const ballVisible=m.phase!=='point' && m.phase!=='over';
   if(ballVisible) shadow(b.x,BR*(1-clamp((GROUND-b.y)/600,0,0.7)),'#396e66');
-  net(-136,0);
-  drawParticles(false);
+  if (soccer) drawGoals(false); else net(-136,0);
+  if (!replay) drawParticles(false);
   const [bx,by]=screen(b.x,b.y);
   m.slimes.forEach((s,i)=>{
     const [x,y]=screen(s.x,s.y);
-    drawSlime(looks[i],i,x,y,{scale:0.94,sq:vis[i].w-clamp(Math.abs(s.vy)/5000,0,0.14),char:vis[i].char,bx,by});
+    drawSlime(looks[i],soccer ? Number(b.x < s.x) : i,x,y,{scale:0.94,sq:(replay ? 0 : vis[i].w)-clamp(Math.abs(s.vy)/5000,0,0.14),char:replay ? 0 : vis[i].char,bx,by});
   });
   if(ballVisible) {
     ctx.save(); ctx.translate(bx,by);
     if(m.phase==='serve') {
       ctx.strokeStyle='#d9b64e'; ctx.lineWidth=2; ctx.beginPath(); ctx.arc(0,0,BR+6+Math.sin(T*14)*2,0,Math.PI*2); ctx.stroke();
     }
-    volleyball(ctx,BR*0.94,spin,b.fire); ctx.restore();
+    drawBall(ctx,BR*0.94,replay ? replay.spin : spin,b.fire,soccer); ctx.restore();
     if(by < -BR) polygon(ctx,'#ffd23a',[bx,6,bx-9,22,bx+9,22]);
   }
-  net(0,136);
-  for (const mark of scorch) drawImpact(mark);
-  drawParticles(true);
+  if (soccer) drawGoals(true); else net(0,136);
+  if (replay) {
+    const mark = scorch.at(-1);
+    if (mark && replay.phase === 'point') drawImpact({...mark, born: T - replay.impactAge});
+  } else {
+    for (const mark of scorch) drawImpact(mark);
+    drawParticles(true);
+  }
 }
 function drawHud() {
   const m = match;
@@ -662,7 +763,7 @@ function drawHud() {
   }
   txt(`FIRST TO ${m.win}`, W / 2, 24, 18, { fill: '#ffd23a' });
   if (mode === 'ladder') txt(`ROUND ${oppI + 1} OF ${OPP.length}`, W / 2, 46, 14, { alpha: 0.8 });
-  if (m.phase === 'play' && m.rally >= 6) txt(`RALLY ${m.rally}`, W / 2, 72, 20, { fill: m.rally >= 14 ? 'fire' : '#fff' });
+  if (m.sport !== 'soccer' && m.phase === 'play' && m.rally >= 6) txt(`RALLY ${m.rally}`, W / 2, 72, 20, { fill: m.rally >= 14 ? 'fire' : '#fff' });
   if (TOUCH && scene === 'match') { txt(mode === 'online' ? '⋯' : paused ? '▶' : 'II', W / 2, 104, 22, { skew: 0, alpha: 0.7 }); btns.push({ x: W / 2 - 40, y: 80, w: 80, h: 48, fn: () => { if (mode === 'online') openRoomMenu(); else { paused = !paused; menuI = 0; } } }); }
 }
 const backOut = t => 1 + 2.7 * (t - 1) ** 3 + 1.7 * (t - 1) ** 2;
@@ -677,9 +778,9 @@ function dim(a) { ctx.fillStyle = `rgba(8,4,22,${a})`; ctx.fillRect(-marginX, -m
 function drawTitle() {
   dim(0.66);
   const pop = backOut(Math.min(1, sceneT / 0.5));
-  txt('SLIME VOLLEYBALL', W / 2, 112, 84, { fill: 'fire', scale: pop });
+  txt(selectedSport === 'soccer' ? 'SLIME SOCCER' : 'SLIME VOLLEYBALL', W / 2, 112, 84, { fill: 'fire', scale: pop });
   txt('2000', W / 2 + 6, 206, 96, { fill: 'chrome', skew: -0.26, scale: pop });
-  txt('EXPLOSIVE SLIME VOLLEY', W / 2, 264, 20, { fill: '#ffd23a' });
+  button('◀  ' + selectedSport.toUpperCase() + '  ▶', W / 2, 264, 26, 6, titleActs[6], true);
   button('LADDER', W / 2, 318, 32, 0, titleActs[0]);
   const w = button(`QUICK MATCH: ${OPP[quickI].name}`, W / 2, 362, 32, 1, titleActs[1]);
   if (menuI === 1) {
@@ -702,7 +803,7 @@ function drawVs() {
   if (sceneT > 0.3) txt('VS', W / 2, 250, 120, { fill: 'fire', scale: backOut(Math.min(1, (sceneT - 0.3) / 0.25)) });
   txt(looks[0].name, 240, 368, 44, { fill: looks[0].color });
   txt(looks[1].name, 720, 368, 44, { fill: looks[1].color });
-  if (looks[1].tag) { txt(looks[1].tag, 720, 410, 24, { fill: '#ffd23a' }); txt(looks[1].blurb, 720, 442, 17, { alpha: 0.9 }); }
+  if (looks[1].tag) { txt(looks[1].tag, 720, 410, 24, { fill: '#ffd23a' }); if (match.sport !== 'soccer') txt(looks[1].blurb, 720, 442, 17, { alpha: 0.9 }); }
   if (!TOUCH) {
     txt(mode === '2p' ? 'A/D MOVE · W JUMP · S DIVE' : 'A/D OR ←/→ MOVE · W JUMP · S DIVE', 240, 410, 17, { alpha: 0.9, skew: 0 });
     if (mode === '2p') txt('←/→ MOVE · ↑ JUMP · ↓ DIVE', 720, 410, 17, { alpha: 0.9, skew: 0 });
@@ -716,8 +817,10 @@ function drawMenu(title, fill, sub, items, y0) {
   if (sub) txt(sub, W / 2, 262, 30);
   items.forEach(([l, fn], i) => button(l, W / 2, y0 + i * 48, 32, i, fn));
 }
-function drawOverlays() {
-  drawHud(); drawCalls();
+function drawOverlays(replay) {
+  drawHud();
+  if (replay) txt('REPLAY', W / 2, 70, 28, {fill:'#ffd23a'});
+  else drawCalls();
   if (paused) { drawMenu('PAUSED', 'chrome', null, [['RESUME', () => { paused = false; }], ['QUIT TO MENU', toTitle]], 300); return; }
   if (scene === 'result' && sceneT > 1.3) {
     const w = match.winner, won = w === 0, s = `${match.score[0]} - ${match.score[1]}`;
@@ -729,15 +832,22 @@ function drawOverlays() {
 function render() {
   ctx.setTransform(scale, 0, 0, scale, marginX * scale, marginY * scale);
   if (marginX > 0) {
+    const bg = arenas[match.sport] || arenas.volleyball;
     ctx.drawImage(bg, 0, 0, 1, bg.height, -marginX, 0, marginX, H);
     ctx.drawImage(bg, bg.width-1, 0, 1, bg.height, W, 0, marginX, H);
   }
   btns.length = 0;
   ctx.save();
-  if (shake > 0.3) { const z = 1 + shake * 0.003; ctx.translate(W / 2 + rnd(-shake, shake) * 0.8, H / 2 + rnd(-shake, shake) * 0.45); ctx.scale(z, z); ctx.translate(-W / 2, -H / 2); }
-  drawWorld();
+  let replay = null;
+  if (scene === 'match' && match.phase === 'point' && replayClip) {
+    // Advance smoothly between ordered online snapshots. The server owns the cut back to serve.
+    const sinceSnapshot = mode === 'online' ? Math.min(0.05, (performance.now() - snapshotAt) / 1000) : 0;
+    replay = replayPose(replayClip, Math.max(0, match.timer - sinceSnapshot));
+  }
+  if (!replay && shake > 0.3) { const z = 1 + shake * 0.003; ctx.translate(W / 2 + rnd(-shake, shake) * 0.8, H / 2 + rnd(-shake, shake) * 0.45); ctx.scale(z, z); ctx.translate(-W / 2, -H / 2); }
+  drawWorld(replay);
   ctx.restore();
-  if (scene === 'room') dim(0.78); else if (scene === 'title') drawTitle(); else if (scene === 'vs') drawVs(); else drawOverlays();
+  if (scene === 'room') dim(0.78); else if (scene === 'title') drawTitle(); else if (scene === 'vs') drawVs(); else drawOverlays(replay);
 }
 
 // ---------- input ----------
@@ -751,6 +861,7 @@ function press(k) {
   if (scene === 'title') {
     nav(titleActs.length);
     if (menuI === 1 && (left || right)) quickI = (quickI + (right ? 1 : OPP.length - 1)) % OPP.length;
+    if (menuI === 6 && (left || right)) cycleSport();
     if (ok) titleActs[menuI]();
   } else if (scene === 'vs') {
     if (ok && sceneT > 0.4) beginPlay();
@@ -866,7 +977,7 @@ function checkInvitation() {
   scene = 'room';
   if (!id) { lobby.show('Play a friend', 'This invite is invalid.'); return; }
   const returning = hasRoomSeat(id);
-  lobby.show('Play a friend', returning ? 'Your seat is saved.' : 'Join your friend on the court.',
+  lobby.show('Play a friend', returning ? 'Your seat is saved.' : 'Join your friend.',
     returning ? 'Rejoin match' : 'Join match', () => enterRoom(id));
 }
 checkInvitation();

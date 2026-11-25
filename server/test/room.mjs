@@ -1,9 +1,10 @@
-// Start local Wrangler on port 8787, then run: node server/test/room.mjs (Node 22+).
+// Start local Wrangler on port 8787, then run: node server/test/room.mjs [soccer] (Node 22+).
 import assert from 'node:assert/strict';
 import { setTimeout as delay } from 'node:timers/promises';
 
 const base = 'http://127.0.0.1:8787/rooms';
-const hostResponse = await fetch(base, { method: 'POST' });
+const sport = process.argv[2] || 'volleyball';
+const hostResponse = await fetch(process.argv[2] ? base+'?sport='+sport : base, { method: 'POST' });
 assert.equal(hostResponse.status, 201);
 const host = await hostResponse.json();
 const url = base + '/' + host.room;
@@ -42,14 +43,22 @@ try {
 
   const a = await connect(host.token), b = await connect(guest.token);
   assert.equal((await a.wait('host seat', m => m.type === 'welcome')).side, 0);
-  assert.equal((await b.wait('guest seat', m => m.type === 'welcome')).side, 1);
+  const welcome = await b.wait('guest seat', m => m.type === 'welcome');
+  assert.equal(welcome.side, 1);
+  assert.equal(welcome.sport, sport);
   a.send('ready');
   await a.wait('waiting for guest', m => m.phase === 'waiting' && m.ready[0] && !m.ready[1]);
   b.send('ready');
   await b.wait('playing', m => m.phase === 'playing');
-  b.send('input', { r: 0.5, u: true });
+  a.send('input', { l: 0.25 }); // Older clients omit prediction sequence numbers.
+  b.send('input', { r: 0.5, u: true, seq: 12 });
   const moving = await a.wait('guest half-speed jump on host', m =>
     m.type === 'state' && m.state.slimes[1].vx === 170 && m.state.slimes[1].y < 460);
+
+  assert.equal(moving.state.sport || 'volleyball', sport);
+  assert.equal(moving.inputAck[1].seq,12);
+  assert.ok(moving.inputAck[1].at < moving.state.time);
+  await b.wait('legacy input applied', m => m.type === 'state' && m.state.slimes[0].vx === -85);
 
   b.socket.close(1000);
   await a.wait('paused room', m => m.phase === 'away' && !m.connected[1]);
@@ -63,7 +72,7 @@ try {
   a.send('leave');
   await resumed.wait('opponent departure', m => m.type === 'ended' && m.reason === 'left');
   assert.equal((await fetch(url + '/join', claim)).status, 404);
-  console.log('Local two-player room smoke test passed.');
+  console.log('Local two-player '+sport+' room smoke test passed.');
 } finally {
   for (const socket of sockets) if (socket.readyState === WebSocket.OPEN) socket.close();
   await fetch(url + '/leave', { method: 'POST', headers: { Authorization: 'Bearer ' + host.token } });
