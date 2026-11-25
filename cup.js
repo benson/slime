@@ -22,12 +22,22 @@ export function drawCup(country) {
     const j = Math.floor(Math.random() * (i+1));
     [field[i],field[j]] = [field[j],field[i]];
   }
-  return {field:[country, ...field], round:0};
+  field.unshift(country);
+  return {field, round:0, draws:[field], results:[]};
+}
+
+// Resolve each tie once. Only the player's match has a played score.
+export function finishCupRound(cup, score) {
+  if (cup.results[cup.round]) return;
+  const results = [];
+  for (let i=0; i<cup.field.length; i+=2) {
+    const side = i === 0 ? Number(score[1] > score[0]) : Math.floor(Math.random()*2);
+    results.push({winner:cup.field[i+side], score:i === 0 ? [...score] : null});
+  }
+  cup.results[cup.round] = results;
+  cup.draws[cup.round+1] = results.map(tie => tie.winner);
 }
 
 export function advanceCup(cup) {
-  const winners = [cup.field[0]];
-  for (let i=2; i<cup.field.length; i+=2) winners.push(cup.field[i + Math.floor(Math.random()*2)]);
-  cup.field = winners;
-  cup.round++;
+  cup.field = cup.draws[++cup.round];
 }
