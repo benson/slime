@@ -1,3 +1,4 @@
+import {cupSaveKey, encodeCup, decodeCup} from './cup-save.js';
 import {bracketView} from './bracket.js';
 import {teams} from './teams.js';
 import {drawFlag} from './flags.js';
@@ -35,6 +36,49 @@ let pickerFooter = -1;
 let bracket = null;
 let selectedSport = 'volleyball', cup = null, countryI = 0;
 try { if (localStorage.getItem('slime-sport') === 'soccer') selectedSport = 'soccer'; } catch {}
+// Keep the last completed round immutable while the next match is being played.
+let savedRaw = null, savedCup = null, runBase = null, saveNotice = '';
+function updateSaved(raw) {
+  savedRaw = raw;
+  savedCup = decodeCup(raw);
+}
+function refreshSave() {
+  try { updateSaved(localStorage.getItem(cupSaveKey)); } catch {}
+}
+refreshSave();
+addEventListener('storage', e => {
+  if (e.key === cupSaveKey || e.key === null) refreshSave();
+});
+function checkpointCup() {
+  const raw = encodeCup(cup);
+  try {
+    if (localStorage.getItem(cupSaveKey) !== runBase) {
+      refreshSave();
+      saveNotice = 'ANOTHER TAB CHANGED YOUR SAVED CUP';
+      return;
+    }
+    localStorage.setItem(cupSaveKey,raw);
+    runBase = raw;
+    updateSaved(raw);
+    saveNotice = '';
+  } catch { saveNotice = 'COULD NOT SAVE ON THIS DEVICE'; }
+}
+function resumeCup() {
+  refreshSave();
+  if (!savedCup) return pickCountry();
+  cup = decodeCup(savedRaw);
+  runBase = savedRaw; saveNotice = '';
+  mode = 'cup'; paused = false; menuI = 0;
+  countryI = teams.indexOf(cup.draws[0][0]);
+  clearInput(); resetFx(); fitMatchScreen();
+  if (!cup.results.length) return startMatch();
+  looks = matchKits(cup.field); brains = [null,null];
+  match = S.createMatch({sport:'soccer'});
+  const tie = cup.results[cup.round][0];
+  match.phase = 'over'; match.winner = Number(tie.winner !== cup.field[0]); match.score = [...tie.score];
+  showCupBracket();
+}
+function hasCupOnTitle() { return selectedSport === 'soccer' && !!savedCup; }
 function cycleSport() {
   selectedSport = selectedSport === 'soccer' ? 'volleyball' : 'soccer';
   try { localStorage.setItem('slime-sport', selectedSport); } catch {}
@@ -383,12 +427,13 @@ function fitMatchScreen() {
   }
 }
 function pickCountry() {
+  refreshSave(); runBase = savedRaw; saveNotice = '';
   pickerFooter = -1;
   mode = 'cup'; scene = 'countries'; sceneT = 0; paused = false; cup = null;
   clearInput(); resetFx(); fitMatchScreen();
 }
 function startCup(i) {
-  countryI = i; cup = drawCup(teams[i]); startMatch();
+  countryI = i; cup = drawCup(teams[i]); checkpointCup(); startMatch();
 }
 function startMatch() {
   if (scene === 'title') fitMatchScreen();
@@ -419,10 +464,10 @@ function resultItems() {
   return [['REMATCH', startMatch], ['MAIN MENU', toTitle]];
 }
 const titleActs = [
-  () => { if (selectedSport === 'soccer') return pickCountry(); mode = 'ladder'; oppI = 0; startMatch(); },
+  () => { if (selectedSport === 'soccer') return savedCup ? resumeCup() : pickCountry(); mode = 'ladder'; oppI = 0; startMatch(); },
   () => { mode = 'quick'; oppI = quickI; startMatch(); },
   () => { mode = '2p'; startMatch(); },
-  () => enterRoom(null), toggleMute, toggleVoice, cycleSport,
+  () => enterRoom(null), toggleMute, toggleVoice, cycleSport, pickCountry,
 ];
 
 function handle(e) {
@@ -454,6 +499,10 @@ function handle(e) {
       replayClip = e.replay || null;
       slowT = replayClip ? 0 : 0.5; play('boom', Math.min(1.3, pow)); cheer(e.highlight && !demo ? 0.23 : 0.16);
       if (demo) break;
+      if (mode === 'cup' && match.score[e.scorer] === match.win) {
+        finishCupRound(cup, match.score);
+        checkpointCup();
+      }
       const celebrate = mode === '2p' || e.scorer === (mode === 'online' ? room.side : 0);
       announcePoint(e, celebrate);
       play('point', celebrate, e);
@@ -477,7 +526,6 @@ function handle(e) {
       for (let k = 0; k < 5; k++) later.push({ t: k * 0.22, fn: () => { explode(lo + rnd(50, 430), GROUND, rnd(0.8, 1.2)); play('boom', 1); } });
       if (demo) { later.push({ t: 3, fn: startDemo }); break; }
       cheer(0.2); play('sting');
-      if (mode === 'cup') finishCupRound(cup, match.score);
       const lastRound = mode === 'cup' ? cup.round === rounds.length-1 : mode === 'ladder' && oppI === OPP.length-1;
       scene = lastRound && e.winner === 0 ? 'champ' : 'result';
       sceneT = 0; menuI = 0; fwT = 0.6;
@@ -811,7 +859,12 @@ function drawTitle() {
   txt(selectedSport === 'soccer' ? 'SLIME SOCCER' : 'SLIME VOLLEYBALL', W / 2, 112, 84, { fill: 'fire', scale: pop });
   txt('2000', W / 2 + 6, 206, 96, { fill: 'chrome', skew: -0.26, scale: pop });
   button('◀  ' + selectedSport.toUpperCase() + '  ▶', W / 2, 264, 26, 6, titleActs[6], true);
-  button(selectedSport === 'soccer' ? 'WORLD CUP' : 'LADDER', W / 2, 318, 32, 0, titleActs[0]);
+  if (hasCupOnTitle()) {
+    const last = savedCup.results.at(-1);
+    const finished = last && (last[0].winner !== savedCup.draws[0][0] || savedCup.results.length === rounds.length);
+    button(finished ? 'VIEW LAST CUP' : 'RESUME CUP', W/2-132,318,32,0,titleActs[0]);
+    button('NEW CUP', W/2+146,318,28,7,titleActs[7]);
+  } else button(selectedSport === 'soccer' ? 'WORLD CUP' : 'LADDER', W / 2, 318, 32, 0, titleActs[0]);
   const w = button(`QUICK MATCH: ${OPP[quickI].name}`, W / 2, 362, 32, 1, titleActs[1]);
   if (menuI === 1) {
     const step = d => () => { quickI = (quickI + d + OPP.length) % OPP.length; play('sel'); };
@@ -866,6 +919,7 @@ function drawVs() {
     txt(mode === '2p' ? 'A/D MOVE · W JUMP · S DIVE' : 'A/D OR ←/→ MOVE · W JUMP · S DIVE', 240, 410, 17, { alpha: 0.9, skew: 0 });
     if (mode === '2p') txt('←/→ MOVE · ↑ JUMP · ↓ DIVE', 720, 410, 17, { alpha: 0.9, skew: 0 });
   }
+  if (mode === 'cup' && saveNotice) txt(saveNotice,W/2,458,19);
   if (Math.sin(T * 6) > -0.3) txt(TOUCH ? 'TAP TO START' : 'PRESS ENTER', W / 2, 500, 22);
   btns.push({ x: 0, y: 0, w: W, h: H, fn: () => { if (sceneT > 0.4) beginPlay(); } });
 }
@@ -923,7 +977,9 @@ function render() {
   drawWorld(replay);
   ctx.restore();
   if (scene === 'bracket') {
-    dim(0.91); bracket.draw(ctx,txt,btns,continueCup,toTitle); return;
+    dim(0.91); bracket.draw(ctx,txt,btns,continueCup,toTitle);
+    if (saveNotice) txt(saveNotice,W/2,530,15);
+    return;
   }
   if (scene === 'room') dim(0.78); else if (scene === 'title') drawTitle(); else if (scene === 'countries') drawCountries(); else if (scene === 'vs') drawVs(); else drawOverlays(replay);
 }
@@ -937,7 +993,10 @@ function press(k) {
   const ok = k === 'Enter' || k === 'Space', esc = k === 'Escape';
   const nav = n => { if (up || down) { menuI = (menuI + (down ? 1 : n - 1)) % n; play('sel'); } };
   if (scene === 'title') {
-    nav(titleActs.length);
+    if (menuI === 7 && (up || down)) menuI = 0;
+    nav(titleActs.length-1);
+    if (hasCupOnTitle() && (menuI === 0 || menuI === 7) && (left || right)) menuI = menuI === 0 ? 7 : 0;
+    if (menuI === 7 && !hasCupOnTitle()) menuI = 0;
     if (menuI === 1 && (left || right)) quickI = (quickI + (right ? 1 : OPP.length - 1)) % OPP.length;
     if (menuI === 6 && (left || right)) cycleSport();
     if (ok) titleActs[menuI]();
