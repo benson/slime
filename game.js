@@ -1,8 +1,9 @@
+import {teams, rounds, rivals, drawCup, advanceCup, drawFlag} from './cup.js';
 import {replayPose} from './replay.js';
 import {FriendRoom, roomFromLink, hasRoomSeat} from './friend-room.js?v=2';
 import {friendLobby} from './friend-lobby.js';
 import {startMusic} from './music.js';
-import {project, slime, drawBall} from './meshes.js?v=3';
+import {project, slime, drawBall} from './meshes.js?v=4';
 import * as S from './sim.js?v=6';
 
 const { W, H, GROUND, NET_X, NET_TOP, NET_HW, SLIME_R: R, BALL_R: BR, DT } = S;
@@ -26,7 +27,7 @@ const OPP = [
 
 // ---------- state ----------
 let scene = 'title', mode = 'ladder', oppI = 0, quickI = 0, menuI = 0, sceneT = 0, T = 0, paused = false;
-let selectedSport = 'volleyball';
+let selectedSport = 'volleyball', cup = null, countryI = 0;
 try { if (localStorage.getItem('slime-sport') === 'soccer') selectedSport = 'soccer'; } catch {}
 function cycleSport() {
   selectedSport = selectedSport === 'soccer' ? 'volleyball' : 'soccer';
@@ -375,12 +376,20 @@ function fitMatchScreen() {
     document.documentElement.requestFullscreen().catch(() => {});
   }
 }
+function pickCountry() {
+  if (countryI >= teams.length) countryI = 0;
+  mode = 'cup'; scene = 'countries'; sceneT = 0; paused = false; cup = null;
+  clearInput(); resetFx(); fitMatchScreen();
+}
+function startCup(i) {
+  countryI = i; cup = drawCup(teams[i]); startMatch();
+}
 function startMatch() {
   if (scene === 'title') fitMatchScreen();
   const o = OPP[oppI];
-  looks = mode === '2p' ? [P1, P2] : [YOU, o];
+  looks = mode === 'cup' ? cup.field.slice(0,2) : mode === '2p' ? [P1,P2] : [YOU,o];
   match = S.createMatch({sport: selectedSport});
-  brains = [null, mode === '2p' ? null : S.makeBrain(o.id)];
+  brains = [null, mode === '2p' ? null : S.makeBrain(mode === 'cup' ? rivals[cup.round] : o.id)];
   setSpeeds(); resetFx();
   scene = 'vs'; sceneT = 0; paused = false; menuI = 0;
 }
@@ -394,11 +403,17 @@ function startDemo() {
 function toTitle() { scene = 'title'; sceneT = 0; menuI = 0; paused = false; startDemo(); }
 function beginPlay() { scene = 'match'; sceneT = 0; play('go'); }
 function resultItems() {
+  if (mode === 'cup') {
+    const next = match.winner === 0
+      ? ['PLAY ' + rounds[cup.round+1], () => { advanceCup(cup); startMatch(); }]
+      : ['NEW CUP', pickCountry];
+    return [next, ['MAIN MENU', toTitle]];
+  }
   if (mode === 'ladder' && match.winner === 0) return [[`NEXT UP: ${OPP[oppI + 1].name}`, () => { oppI++; startMatch(); }], ['MAIN MENU', toTitle]];
   return [['REMATCH', startMatch], ['MAIN MENU', toTitle]];
 }
 const titleActs = [
-  () => { mode = 'ladder'; oppI = 0; startMatch(); },
+  () => { if (selectedSport === 'soccer') return pickCountry(); mode = 'ladder'; oppI = 0; startMatch(); },
   () => { mode = 'quick'; oppI = quickI; startMatch(); },
   () => { mode = '2p'; startMatch(); },
   () => enterRoom(null), toggleMute, toggleVoice, cycleSport,
@@ -456,7 +471,8 @@ function handle(e) {
       for (let k = 0; k < 5; k++) later.push({ t: k * 0.22, fn: () => { explode(lo + rnd(50, 430), GROUND, rnd(0.8, 1.2)); play('boom', 1); } });
       if (demo) { later.push({ t: 3, fn: startDemo }); break; }
       cheer(0.2); play('sting');
-      scene = mode === 'ladder' && e.winner === 0 && oppI === OPP.length - 1 ? 'champ' : 'result';
+      const lastRound = mode === 'cup' ? cup.round === rounds.length-1 : mode === 'ladder' && oppI === OPP.length-1;
+      scene = lastRound && e.winner === 0 ? 'champ' : 'result';
       sceneT = 0; menuI = 0; fwT = 0.6;
       break;
     }
@@ -756,12 +772,15 @@ function drawHud() {
   const m = match;
   for (let i = 0; i < 2; i++) {
     const x = i ? W - 24 : 24, al = i ? 'right' : 'left', k = m.streak[i];
-    txt(looks[i].name, x, 28, 26, { align: al, fill: looks[i].color });
+    const flagOffset = mode === 'cup' ? (i ? -43 : 43) : 0;
+    if (mode === 'cup') drawFlag(ctx, looks[i], i ? x-35 : x, 17, 35, 22);
+    txt(looks[i].name, x + flagOffset, 28, 26, { align: al, fill: looks[i].color });
     txt(String(m.score[i]), i ? W - 26 : 26, 82, 70, { align: al, fill: k >= 3 ? 'fire' : '#fff' });
     if (k >= 3) txt('ON FIRE', i ? W - 80 : 80, 70, 20, { align: al, fill: 'fire', alpha: 0.75 + Math.sin(T * 20) * 0.25 });
     else if (k === 2) txt("SMOKIN'", i ? W - 80 : 80, 70, 18, { align: al, fill: '#c9c2d0' });
   }
   txt(`FIRST TO ${m.win}`, W / 2, 24, 18, { fill: '#ffd23a' });
+  if (mode === 'cup') txt(rounds[cup.round], W/2, 46, 16, {fill:'#ffd23a'});
   if (mode === 'ladder') txt(`ROUND ${oppI + 1} OF ${OPP.length}`, W / 2, 46, 14, { alpha: 0.8 });
   if (m.sport !== 'soccer' && m.phase === 'play' && m.rally >= 6) txt(`RALLY ${m.rally}`, W / 2, 72, 20, { fill: m.rally >= 14 ? 'fire' : '#fff' });
   if (TOUCH && scene === 'match') { txt(mode === 'online' ? '⋯' : paused ? '▶' : 'II', W / 2, 104, 22, { skew: 0, alpha: 0.7 }); btns.push({ x: W / 2 - 40, y: 80, w: 80, h: 48, fn: () => { if (mode === 'online') openRoomMenu(); else { paused = !paused; menuI = 0; } } }); }
@@ -781,7 +800,7 @@ function drawTitle() {
   txt(selectedSport === 'soccer' ? 'SLIME SOCCER' : 'SLIME VOLLEYBALL', W / 2, 112, 84, { fill: 'fire', scale: pop });
   txt('2000', W / 2 + 6, 206, 96, { fill: 'chrome', skew: -0.26, scale: pop });
   button('◀  ' + selectedSport.toUpperCase() + '  ▶', W / 2, 264, 26, 6, titleActs[6], true);
-  button('LADDER', W / 2, 318, 32, 0, titleActs[0]);
+  button(selectedSport === 'soccer' ? 'WORLD CUP' : 'LADDER', W / 2, 318, 32, 0, titleActs[0]);
   const w = button(`QUICK MATCH: ${OPP[quickI].name}`, W / 2, 362, 32, 1, titleActs[1]);
   if (menuI === 1) {
     const step = d => () => { quickI = (quickI + d + OPP.length) % OPP.length; play('sel'); };
@@ -794,9 +813,27 @@ function drawTitle() {
   button(`ANNOUNCER: ${voiceOn ? 'ON' : 'OFF'}`, W / 2 + 110, 480, 22, 5, titleActs[5]);
   if (!TOUCH) txt('P1: A/D MOVE · W JUMP · S DIVE      P2: ARROW KEYS      P PAUSE · M MUTE', W / 2, 512, 15, { alpha: 0.7, skew: 0 });
 }
+function drawCountries() {
+  dim(0.86);
+  txt('WORLD CUP', W/2, 78, 74, {fill:'fire'});
+  txt('CHOOSE YOUR COUNTRY', W/2, 146, 24, {fill:'chrome'});
+  teams.forEach((team,i) => {
+    const x = 84 + i%4 * 202, y = 186 + Math.floor(i/4)*118;
+    const selected = i === countryI;
+    ctx.fillStyle = selected ? '#39475d' : '#20293a';
+    ctx.fillRect(x,y,186,104);
+    if (selected) { ctx.strokeStyle='#ffd23a'; ctx.lineWidth=3; ctx.strokeRect(x,y,186,104); }
+    drawFlag(ctx,team,x+63,y+13,60,39);
+    txt(team.name,x+93,y+77,24,{fill:selected ? '#ffd23a' : '#fff'});
+    btns.push({x,y,w:186,h:104,fn:()=>startCup(i)});
+  });
+  txt('BACK',W/2,468,26,{fill:countryI===teams.length ? '#ffd23a' : '#ddd'});
+  btns.push({x:W/2-70,y:440,w:140,h:56,fn:toTitle});
+}
 function drawVs() {
   dim(0.8);
-  txt(mode === 'ladder' ? `ROUND ${oppI + 1} OF ${OPP.length}` : mode === 'quick' ? 'QUICK MATCH' : '2 PLAYERS', W / 2, 60, 34, { fill: '#ffd23a' });
+  txt(mode === 'cup' ? 'WORLD CUP · ' + rounds[cup.round] : mode === 'ladder' ? `ROUND ${oppI + 1} OF ${OPP.length}` : mode === 'quick' ? 'QUICK MATCH' : '2 PLAYERS', W / 2, 60, 34, { fill: '#ffd23a' });
+  if (mode === 'cup') looks.forEach((team,i) => drawFlag(ctx,team,195+i*480,125,90,54));
   const slide = 1 - Math.min(1, sceneT / 0.35) ** 0.5;
   drawSlime(looks[0], 0, 240 - slide * 500, 320, { scale: 2.3, bx: W, by: 220 });
   drawSlime(looks[1], 1, 720 + slide * 500, 320, { scale: 2.3, bx: 0, by: 220 });
@@ -817,6 +854,19 @@ function drawMenu(title, fill, sub, items, y0) {
   if (sub) txt(sub, W / 2, 262, 30);
   items.forEach(([l, fn], i) => button(l, W / 2, y0 + i * 48, 32, i, fn));
 }
+function drawCupTrophy() {
+  ctx.save(); ctx.translate(W/2,90);
+  for (const direction of [-1,1]) {
+    ctx.save(); ctx.scale(direction,1);
+    ctx.strokeStyle='#db9542'; ctx.lineWidth=6; ctx.beginPath();
+    ctx.moveTo(20,-19); ctx.lineTo(38,-19); ctx.lineTo(34,-3); ctx.lineTo(15,7); ctx.stroke();
+    ctx.restore();
+  }
+  polygon(ctx,'#eca83e',[-25,-26,25,-26,21,-3,12,9,5,13,4,22,16,28,-16,28,-4,22,-5,13,-12,9,-21,-3]);
+  polygon(ctx,'#ffe79c',[-23,-23,-13,-23,-9,-2,-5,9,-14,3,-19,-5]);
+  ctx.fillStyle='#fff0a8'; ctx.fillRect(-26,-28,52,5);
+  ctx.fillStyle='#805334'; ctx.fillRect(-20,28,40,6); ctx.restore();
+}
 function drawOverlays(replay) {
   drawHud();
   if (replay) txt('REPLAY', W / 2, 70, 28, {fill:'#ffd23a'});
@@ -825,9 +875,18 @@ function drawOverlays(replay) {
   if (scene === 'result' && sceneT > 1.3) {
     const w = match.winner, won = w === 0, s = `${match.score[0]} - ${match.score[1]}`;
     const shut = match.score[1 - w] === 0 ? 'TOTAL MELTDOWN · ' : '';
+    if (mode === 'cup') {
+      drawMenu(won ? 'THROUGH!' : 'KNOCKED OUT', won ? 'fire' : 'chrome',
+        looks[0].name + '  ' + s + '  ' + looks[1].name, resultItems(), 330);
+      return;
+    }
     drawMenu(mode === '2p' ? `${looks[w].name} WINS!` : won ? 'YOU WIN!' : 'YOU GOT TORCHED', won || mode === '2p' ? 'fire' : 'chrome', shut + s, resultItems(), 330);
   }
-  if (scene === 'champ' && sceneT > 1.3) drawMenu('LADDER CHAMPION', 'fire', 'ALL FIVE. UP IN SMOKE.', [['MAIN MENU', toTitle]], 340);
+  if (scene === 'champ' && sceneT > 1.3) {
+    drawMenu(mode === 'cup' ? 'WORLD CHAMPIONS' : 'LADDER CHAMPION', 'fire',
+      mode === 'cup' ? looks[0].name + '  ' + match.score.join(' - ') + '  ' + looks[1].name : 'ALL FIVE. UP IN SMOKE.', [['MAIN MENU', toTitle]], 340);
+    if (mode === 'cup') drawCupTrophy();
+  }
 }
 function render() {
   ctx.setTransform(scale, 0, 0, scale, marginX * scale, marginY * scale);
@@ -847,7 +906,7 @@ function render() {
   if (!replay && shake > 0.3) { const z = 1 + shake * 0.003; ctx.translate(W / 2 + rnd(-shake, shake) * 0.8, H / 2 + rnd(-shake, shake) * 0.45); ctx.scale(z, z); ctx.translate(-W / 2, -H / 2); }
   drawWorld(replay);
   ctx.restore();
-  if (scene === 'room') dim(0.78); else if (scene === 'title') drawTitle(); else if (scene === 'vs') drawVs(); else drawOverlays(replay);
+  if (scene === 'room') dim(0.78); else if (scene === 'title') drawTitle(); else if (scene === 'countries') drawCountries(); else if (scene === 'vs') drawVs(); else drawOverlays(replay);
 }
 
 // ---------- input ----------
@@ -863,6 +922,19 @@ function press(k) {
     if (menuI === 1 && (left || right)) quickI = (quickI + (right ? 1 : OPP.length - 1)) % OPP.length;
     if (menuI === 6 && (left || right)) cycleSport();
     if (ok) titleActs[menuI]();
+  } else if (scene === 'countries') {
+    if (esc) return toTitle();
+    if (countryI === teams.length) {
+      if (ok) return toTitle();
+      if (up || down) countryI = up ? 4 : 0;
+    } else {
+      if (left || right) countryI = (countryI + (right ? 1 : teams.length-1)) % teams.length;
+      if (up || down) {
+        const next = countryI + (down ? 4 : -4);
+        countryI = next < 0 || next >= teams.length ? teams.length : next;
+      }
+      if (ok) startCup(countryI);
+    }
   } else if (scene === 'vs') {
     if (ok && sceneT > 0.4) beginPlay();
     if (esc) toTitle();

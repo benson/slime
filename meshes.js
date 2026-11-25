@@ -24,7 +24,9 @@ function lathe(profile, sides, color) {
   return faces;
 }
 const sphere = [[0,-1],[0.71,-0.71],[1,0],[0.71,0.71],[0,1]];
-const body = lathe([[1,0],[0.94,0.34],[0.73,0.68],[0.4,0.92],[0,1]],12);
+const bodyProfile = [[1,0],[0.94,0.34],[0.73,0.68],[0.4,0.92],[0,1]];
+const body = lathe(bodyProfile,12);
+const jersey = lathe(bodyProfile,12,(side,row) => row === 1 && side % 3 === 0 ? 'panel' : null);
 const eye = lathe(sphere,8,'#fff4de'), pupil = lathe(sphere,8,'#1d2636');
 const band = lathe([[0.78,0.63],[0.68,0.75]],12,'#f3e8cf');
 const brim = lathe([[0,0],[1,0],[1,0.8],[0,1]],8,'#403452');
@@ -90,9 +92,9 @@ function paint(ctx, faces) {
 export function slime(ctx,look,side,squash,char,aimX,aimY) {
   const faces=[], dir=side?-1:1;
   function part(mesh,x,y,z,w,h,d) {
-    addFaces(faces,mesh,([a,b,c])=>[(x+a*w)*(1+squash),(y+b*h)*(1-squash),(z+c*d)*(1+squash)],look.color,mesh===body?1-Math.min(0.7,char||0):1);
+    addFaces(faces,mesh,([a,b,c])=>[(x+a*w)*(1+squash),(y+b*h)*(1-squash),(z+c*d)*(1+squash)],look.color,mesh===body || mesh===jersey ? 1-Math.min(0.7,char||0) : 1,look.kit);
   }
-  part(body,0,0,0,46,46,46);
+  part(look.kit ? jersey : body,0,0,0,46,46,46);
   if(look.acc==='band') part(band,0,0,0,47,46,47);
   if(look.acc==='hat') { part(brim,-dir*4,43,0,21,4,20); part(crown,-dir*4,46,0,14,21,14); }
   if(look.acc==='horns') for(const z of [-19,19]) part(horn,0,38,z,7,22,7);
