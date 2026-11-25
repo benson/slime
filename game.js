@@ -1,4 +1,6 @@
-import {teams, rounds, rivals, drawCup, advanceCup, drawFlag} from './cup.js';
+import {teams} from './teams.js';
+import {drawFlag} from './flags.js';
+import {rounds, rivals, drawCup, advanceCup, matchKits} from './cup.js?v=2';
 import {replayPose} from './replay.js';
 import {FriendRoom, roomFromLink, hasRoomSeat} from './friend-room.js?v=2';
 import {friendLobby} from './friend-lobby.js';
@@ -27,6 +29,8 @@ const OPP = [
 
 // ---------- state ----------
 let scene = 'title', mode = 'ladder', oppI = 0, quickI = 0, menuI = 0, sceneT = 0, T = 0, paused = false;
+const countriesPerPage = 8;
+let pickerFooter = -1;
 let selectedSport = 'volleyball', cup = null, countryI = 0;
 try { if (localStorage.getItem('slime-sport') === 'soccer') selectedSport = 'soccer'; } catch {}
 function cycleSport() {
@@ -377,7 +381,7 @@ function fitMatchScreen() {
   }
 }
 function pickCountry() {
-  if (countryI >= teams.length) countryI = 0;
+  pickerFooter = -1;
   mode = 'cup'; scene = 'countries'; sceneT = 0; paused = false; cup = null;
   clearInput(); resetFx(); fitMatchScreen();
 }
@@ -387,7 +391,7 @@ function startCup(i) {
 function startMatch() {
   if (scene === 'title') fitMatchScreen();
   const o = OPP[oppI];
-  looks = mode === 'cup' ? cup.field.slice(0,2) : mode === '2p' ? [P1,P2] : [YOU,o];
+  looks = mode === 'cup' ? matchKits(cup.field) : mode === '2p' ? [P1,P2] : [YOU,o];
   match = S.createMatch({sport: selectedSport});
   brains = [null, mode === '2p' ? null : S.makeBrain(mode === 'cup' ? rivals[cup.round] : o.id)];
   setSpeeds(); resetFx();
@@ -522,6 +526,7 @@ function txt(s, x, y, size, o = {}) {
   if (o.scale) ctx.scale(o.scale, o.scale);
   ctx.transform(1, 0, o.skew ?? -0.16, 1, 0, 0);
   ctx.font = `${size}px ${FONT}`; ctx.textAlign = o.align || 'center'; ctx.textBaseline = 'middle'; ctx.lineJoin = 'round';
+  if (o.maxWidth) ctx.scale(Math.min(1, o.maxWidth / ctx.measureText(s).width), 1);
   ctx.globalAlpha = o.alpha ?? 1;
   ctx.lineWidth = Math.max(3, size * 0.14); ctx.strokeStyle = '#0a0410'; ctx.strokeText(s, 0, 0);
   const ink = o.fill === 'fire' ? '#ffbb39' : o.fill === 'chrome' ? '#bdede8' : o.fill || '#fff6dc';
@@ -774,7 +779,7 @@ function drawHud() {
     const x = i ? W - 24 : 24, al = i ? 'right' : 'left', k = m.streak[i];
     const flagOffset = mode === 'cup' ? (i ? -43 : 43) : 0;
     if (mode === 'cup') drawFlag(ctx, looks[i], i ? x-35 : x, 17, 35, 22);
-    txt(looks[i].name, x + flagOffset, 28, 26, { align: al, fill: looks[i].color });
+    txt(looks[i].name, x + flagOffset, 28, 26, { align: al, fill: looks[i].labelColor || looks[i].color, maxWidth:320 });
     txt(String(m.score[i]), i ? W - 26 : 26, 82, 70, { align: al, fill: k >= 3 ? 'fire' : '#fff' });
     if (k >= 3) txt('ON FIRE', i ? W - 80 : 80, 70, 20, { align: al, fill: 'fire', alpha: 0.75 + Math.sin(T * 20) * 0.25 });
     else if (k === 2) txt("SMOKIN'", i ? W - 80 : 80, 70, 18, { align: al, fill: '#c9c2d0' });
@@ -817,18 +822,28 @@ function drawCountries() {
   dim(0.86);
   txt('WORLD CUP', W/2, 78, 74, {fill:'fire'});
   txt('CHOOSE YOUR COUNTRY', W/2, 146, 24, {fill:'chrome'});
-  teams.forEach((team,i) => {
-    const x = 84 + i%4 * 202, y = 186 + Math.floor(i/4)*118;
-    const selected = i === countryI;
+  const first = countryI - countryI % countriesPerPage;
+  teams.slice(first, first + countriesPerPage).forEach((team,slot) => {
+    const i = first + slot;
+    const x = 84 + slot%4 * 202, y = 186 + Math.floor(slot/4)*118;
+    const selected = pickerFooter < 0 && i === countryI;
     ctx.fillStyle = selected ? '#39475d' : '#20293a';
     ctx.fillRect(x,y,186,104);
     if (selected) { ctx.strokeStyle='#ffd23a'; ctx.lineWidth=3; ctx.strokeRect(x,y,186,104); }
+    txt(String(team.rank),x+12,y+19,17,{align:'left',fill:'#c4cdd6',skew:0});
     drawFlag(ctx,team,x+63,y+13,60,39);
-    txt(team.name,x+93,y+77,24,{fill:selected ? '#ffd23a' : '#fff'});
+    txt(team.name,x+93,y+77,24,{maxWidth:166,fill:selected ? '#ffd23a' : '#fff'});
     btns.push({x,y,w:186,h:104,fn:()=>startCup(i)});
   });
-  txt('BACK',W/2,468,26,{fill:countryI===teams.length ? '#ffd23a' : '#ddd'});
-  btns.push({x:W/2-70,y:440,w:140,h:56,fn:toTitle});
+  const controls = [['BACK',172,toTitle], ['◀',375,()=>turnCountryPage(-1)], ['▶',585,()=>turnCountryPage(1)]];
+  txt((first+1) + '–' + Math.min(first+countriesPerPage, teams.length) + ' / ' + teams.length,W/2,468,23,{skew:0});
+  controls.forEach(([label,x,fn],i) => {
+    txt(label,x,468,26,{fill:pickerFooter===i ? '#ffd23a' : '#ddd'});
+    btns.push({x:x-45,y:435,w:90,h:66,fn});
+  });
+}
+function turnCountryPage(step) {
+  countryI = (countryI + step*countriesPerPage + teams.length) % teams.length;
 }
 function drawVs() {
   dim(0.8);
@@ -838,8 +853,8 @@ function drawVs() {
   drawSlime(looks[0], 0, 240 - slide * 500, 320, { scale: 2.3, bx: W, by: 220 });
   drawSlime(looks[1], 1, 720 + slide * 500, 320, { scale: 2.3, bx: 0, by: 220 });
   if (sceneT > 0.3) txt('VS', W / 2, 250, 120, { fill: 'fire', scale: backOut(Math.min(1, (sceneT - 0.3) / 0.25)) });
-  txt(looks[0].name, 240, 368, 44, { fill: looks[0].color });
-  txt(looks[1].name, 720, 368, 44, { fill: looks[1].color });
+  txt(looks[0].name, 240, 368, 44, { fill: looks[0].color, maxWidth:415 });
+  txt(looks[1].name, 720, 368, 44, { fill: looks[1].labelColor || looks[1].color, maxWidth:415 });
   if (looks[1].tag) { txt(looks[1].tag, 720, 410, 24, { fill: '#ffd23a' }); if (match.sport !== 'soccer') txt(looks[1].blurb, 720, 442, 17, { alpha: 0.9 }); }
   if (!TOUCH) {
     txt(mode === '2p' ? 'A/D MOVE · W JUMP · S DIVE' : 'A/D OR ←/→ MOVE · W JUMP · S DIVE', 240, 410, 17, { alpha: 0.9, skew: 0 });
@@ -851,7 +866,7 @@ function drawVs() {
 function drawMenu(title, fill, sub, items, y0) {
   dim(0.5);
   txt(title, W / 2, 190, 96, { fill, scale: backOut(Math.min(1, sceneT / 0.3 || 1)) });
-  if (sub) txt(sub, W / 2, 262, 30);
+  if (sub) txt(sub, W / 2, 262, 30, {maxWidth:880});
   items.forEach(([l, fn], i) => button(l, W / 2, y0 + i * 48, 32, i, fn));
 }
 function drawCupTrophy() {
@@ -924,14 +939,20 @@ function press(k) {
     if (ok) titleActs[menuI]();
   } else if (scene === 'countries') {
     if (esc) return toTitle();
-    if (countryI === teams.length) {
-      if (ok) return toTitle();
-      if (up || down) countryI = up ? 4 : 0;
+    if (k === 'PageUp' || k === 'PageDown') turnCountryPage(k === 'PageUp' ? -1 : 1);
+    else if (pickerFooter >= 0) {
+      if (left || right) pickerFooter = (pickerFooter + (right ? 1 : 2)) % 3;
+      if (up || down) pickerFooter = -1;
+      if (ok) {
+        if (pickerFooter === 0) return toTitle();
+        turnCountryPage(pickerFooter === 1 ? -1 : 1);
+      }
     } else {
       if (left || right) countryI = (countryI + (right ? 1 : teams.length-1)) % teams.length;
       if (up || down) {
-        const next = countryI + (down ? 4 : -4);
-        countryI = next < 0 || next >= teams.length ? teams.length : next;
+        const slot = countryI % countriesPerPage;
+        if ((down && slot >= 4) || (up && slot < 4)) pickerFooter = 0;
+        else countryI += down ? 4 : -4;
       }
       if (ok) startCup(countryI);
     }
