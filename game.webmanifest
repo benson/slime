@@ -1,0 +1,9 @@
+{
+  "name": "SLIME VOLLEYBALL 2000",
+  "short_name": "Slime Volleyball",
+  "start_url": "./",
+  "display": "standalone",
+  "orientation": "landscape",
+  "background_color": "#05030c",
+  "theme_color": "#05030c"
+}
