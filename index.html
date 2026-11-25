@@ -11,11 +11,11 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>SLIME VOLLEYBALL 2000</title>
 <link rel="canonical" href="https://bensonperry.com/slime/">
-<meta name="description" content="Spike, dive, and catch fire in low-poly arcade volleyball. Take on five slime rivals or play a friend on one keyboard.">
+<meta name="description" content="Spike, dive, and catch fire in low-poly arcade volleyball. Take on five slime rivals or challenge a friend online with a private match link.">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Benson Perry">
 <meta property="og:title" content="SLIME VOLLEYBALL 2000">
-<meta property="og:description" content="Spike, dive, and catch fire in low-poly arcade volleyball. Take on five slime rivals or play a friend on one keyboard.">
+<meta property="og:description" content="Spike, dive, and catch fire in low-poly arcade volleyball. Take on five slime rivals or challenge a friend online with a private match link.">
 <meta property="og:url" content="https://bensonperry.com/slime/">
 <meta property="og:image" content="https://bensonperry.com/slime/social-card.png">
 <meta property="og:image:type" content="image/png">
@@ -24,17 +24,25 @@
 <meta property="og:image:alt" content="SLIME VOLLEYBALL 2000 above a green slime and an orange mohawked rival facing off across the net.">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="SLIME VOLLEYBALL 2000">
-<meta name="twitter:description" content="Spike, dive, and catch fire in low-poly arcade volleyball. Take on five slime rivals or play a friend on one keyboard.">
+<meta name="twitter:description" content="Spike, dive, and catch fire in low-poly arcade volleyball. Take on five slime rivals or challenge a friend online with a private match link.">
 <meta name="twitter:image" content="https://bensonperry.com/slime/social-card.png">
 <meta name="twitter:image:alt" content="SLIME VOLLEYBALL 2000 above a green slime and an orange mohawked rival facing off across the net.">
-<link rel="stylesheet" href="style.css?v=4">
+<link rel="stylesheet" href="style.css?v=5">
 </head>
 <body class="no-shared-footer">
 <canvas id="game" width="960" height="540"></canvas>
+<section id="friend-lobby" aria-labelledby="friend-title" hidden>
+  <h1 id="friend-title" tabindex="-1">Play a friend</h1>
+  <p role="status"></p>
+  <button type="button" data-share hidden>Share invite</button>
+  <input type="text" aria-label="Match invite link" readonly hidden>
+  <button type="button" data-primary hidden></button>
+  <button type="button" data-leave>Leave room</button>
+</section>
 <div id="pad" hidden>
   <div id="stick" role="group" aria-label="Joystick: left, right, down to dive"><span></span></div>
   <button id="jump" type="button">Jump</button>
 </div>
-<script type="module" src="game.js?v=13"></script>
+<script type="module" src="game.js?v=14"></script>
 </body>
 </html>

@@ -1,3 +1,5 @@
+import {FriendRoom, roomFromLink, hasRoomSeat} from './friend-room.js';
+import {friendLobby} from './friend-lobby.js';
 import {startMusic} from './music.js';
 import {project, slime, volleyball} from './meshes.js?v=2';
 import * as S from './sim.js?v=5';
@@ -180,7 +182,7 @@ function explode(x, y, p) {
   if (scorch.length > 24) scorch.shift();
   if (match) match.slimes.forEach((s, i) => {
     const d = Math.abs(s.x - x);
-    if (d < 190) { vis[i].char = 1.8; if (s.y >= GROUND) s.vy = -(300 + (190 - d) * 2.2); }
+    if (d < 190) { vis[i].char = 1.8; if (mode !== 'online' && s.y >= GROUND) s.vy = -(300 + (190 - d) * 2.2); }
   });
 }
 function firework(x, y) {
@@ -242,13 +244,96 @@ function updateFx(dt) {
 }
 
 // ---------- match flow ----------
+let room = null, roomMenu = false;
+const panel = document.getElementById('friend-lobby');
+const lobby = friendLobby(panel, {leave: exitRoom});
+function clearInput() {
+  for (const k in keys) keys[k] = false;
+  releaseControls();
+  room?.input({l:0,r:0,u:false,d:false});
+}
+function exitRoom() {
+  const old = room; room = null;
+  old?.leave();
+  history.replaceState(null, '', location.pathname + location.search);
+  lobby.hide(); clearInput(); roomMenu = false; mode = 'ladder'; toTitle();
+}
+function showRoom(status, detail = '') {
+  if (!room) return;
+  if (status === 'playing') {
+    if (scene !== 'match') {
+      resetFx(); beginPlay(); clearInput();
+    }
+    if (!roomMenu) lobby.hide();
+    return;
+  }
+  if (status === 'finished') {
+    roomMenu = false;
+    scene = 'room';
+    const final = room.sample() || match;
+    const title = final.winner < 0 ? 'Match finished' : final.winner === room.side ? 'You win!' : 'Friend wins!';
+    const waiting = room.wantsRematch || room.players.rematch?.[room.side];
+    const message = [final.score.join(' – '), waiting ? 'Waiting for your friend…' : room.detail].filter(Boolean).join(' · ');
+    lobby.show(title, message, waiting ? 'Rematch requested' : 'Rematch', waiting ? null : () => {
+      room.rematch(); showRoom('finished');
+    });
+    return;
+  }
+  roomMenu = false; scene = 'room'; clearInput();
+  if (status === 'waiting') {
+    const link = room.side === 0 && room.canShare ? room.inviteURL : '';
+    lobby.show('Play a friend', detail || 'Waiting for your friend…',
+      'Ready', room.wantsReady ? null : () => {
+        audio(); fitMatchScreen(); room.ready();
+        if (room.status === 'waiting') showRoom('waiting', detail);
+      }, link);
+  } else {
+    const fallback = {connecting:'Connecting…', reconnecting:'Reconnecting…',
+      away:'Waiting for your friend to reconnect…', closed:'This match has ended.', error:'Could not connect.'};
+    lobby.show('Play a friend', detail || fallback[status] || 'Connecting…');
+  }
+}
+function enterRoom(id) {
+  audio(); mode = 'online'; scene = 'room'; paused = roomMenu = false;
+  resetFx(); brains = [null,null]; looks = [P1,P2]; match = S.createMatch();
+  const session = new FriendRoom({
+    onStatus(status, detail) {
+      if (room !== session) return;
+      if (session.side === 0 || session.side === 1) {
+        looks = [P1,P2].map((look,i)=>({...look, name:i === session.side ? 'YOU' : 'FRIEND'}));
+      }
+      showRoom(status, detail);
+    },
+    onSnapshot(state, events) {
+      if (room !== session) return;
+      match = state;
+      for (const ev of events || []) handle(ev);
+      if (session.status === 'finished') showRoom('finished');
+    }
+  });
+  room = session;
+  showRoom('connecting');
+  (id ? session.join(id) : session.create()).catch(error => {
+    if (room === session) showRoom('error',error.message);
+  });
+}
+function openRoomMenu() {
+  if (roomMenu || !room || room.status !== 'playing') return;
+  roomMenu = true; clearInput();
+  lobby.show('Live match', 'The match is still playing.', 'Keep playing', () => {
+    roomMenu = false; lobby.hide();
+  });
+}
 function setSpeeds() { brains.forEach((b, i) => { match.slimes[i].speed = b ? b.cfg.speed : 1; }); }
-function startMatch() {
-  if (scene === 'title' && TOUCH && document.fullscreenEnabled && !document.fullscreenElement &&
+function fitMatchScreen() {
+  if (TOUCH && document.fullscreenEnabled && !document.fullscreenElement &&
       !navigator.standalone && !matchMedia('(display-mode: standalone)').matches &&
       matchMedia('(orientation: landscape)').matches) {
     document.documentElement.requestFullscreen().catch(() => {});
   }
+}
+function startMatch() {
+  if (scene === 'title') fitMatchScreen();
   const o = OPP[oppI];
   looks = mode === '2p' ? [P1, P2] : [YOU, o];
   match = S.createMatch();
@@ -273,7 +358,7 @@ const titleActs = [
   () => { mode = 'ladder'; oppI = 0; startMatch(); },
   () => { mode = 'quick'; oppI = quickI; startMatch(); },
   () => { mode = '2p'; startMatch(); },
-  toggleMute, toggleVoice,
+  () => enterRoom(null), toggleMute, toggleVoice,
 ];
 
 function handle(e) {
@@ -304,7 +389,7 @@ function handle(e) {
       explode(e.x, GROUND, pow);
       slowT = 0.5; play('boom', Math.min(1.3, pow)); cheer(0.16);
       if (demo) break;
-      const celebrate = mode === '2p' || e.scorer === 0;
+      const celebrate = mode === '2p' || e.scorer === (mode === 'online' ? room.side : 0);
       announce(pointCalls[e.pointKind][celebrate ? 'scored' : 'conceded']);
       play('point', celebrate, e);
       const k = match.streak[e.scorer];
@@ -321,6 +406,7 @@ function handle(e) {
       break;
     }
     case 'over': {
+      if (mode === 'online') { cheer(0.2); play('sting'); break; }
       const lo = e.winner ? 0 : 480;
       for (let k = 0; k < 5; k++) later.push({ t: k * 0.22, fn: () => { explode(lo + rnd(50, 430), GROUND, rnd(0.8, 1.2)); play('boom', 1); } });
       if (demo) { later.push({ t: 3, fn: startDemo }); break; }
@@ -350,6 +436,14 @@ function stepSim() {
 
 function update(dt) {
   sceneT += dt;
+  if (mode === 'online') {
+    if (scene === 'match' && room && room.status === 'playing') {
+      if (!roomMenu) room.input(human(WASD,ARROWS));
+      match = room.sample() || match;
+      updateFx(dt);
+    }
+    return;
+  }
   const running = scene === 'title' || scene === 'result' || scene === 'champ' || (scene === 'match' && !paused);
   if (scene === 'vs' && sceneT > 4) beginPlay();
   if (!running) { if (scene === 'vs') T += dt; return; }
@@ -569,7 +663,7 @@ function drawHud() {
   txt(`FIRST TO ${m.win}`, W / 2, 24, 18, { fill: '#ffd23a' });
   if (mode === 'ladder') txt(`ROUND ${oppI + 1} OF ${OPP.length}`, W / 2, 46, 14, { alpha: 0.8 });
   if (m.phase === 'play' && m.rally >= 6) txt(`RALLY ${m.rally}`, W / 2, 72, 20, { fill: m.rally >= 14 ? 'fire' : '#fff' });
-  if (TOUCH && scene === 'match') { txt(paused ? '▶' : 'II', W / 2, 104, 22, { skew: 0, alpha: 0.7 }); btns.push({ x: W / 2 - 40, y: 80, w: 80, h: 48, fn: () => { paused = !paused; menuI = 0; } }); }
+  if (TOUCH && scene === 'match') { txt(mode === 'online' ? '⋯' : paused ? '▶' : 'II', W / 2, 104, 22, { skew: 0, alpha: 0.7 }); btns.push({ x: W / 2 - 40, y: 80, w: 80, h: 48, fn: () => { if (mode === 'online') openRoomMenu(); else { paused = !paused; menuI = 0; } } }); }
 }
 const backOut = t => 1 + 2.7 * (t - 1) ** 3 + 1.7 * (t - 1) ** 2;
 function drawCalls() {
@@ -593,9 +687,10 @@ function drawTitle() {
     txt('◀', W / 2 - w / 2 - 78, 362, 24, { skew: 0, fill: OPP[quickI].color }); txt('▶', W / 2 + w / 2 + 78, 362, 24, { skew: 0, fill: OPP[quickI].color });
     btns.unshift({ x: W / 2 - w / 2 - 104, y: 340, w: 50, h: 44, fn: step(-1) }, { x: W / 2 + w / 2 + 54, y: 340, w: 50, h: 44, fn: step(1) });
   }
-  button('2 PLAYERS', W / 2, 406, 32, 2, titleActs[2]);
-  button(`SOUND: ${muted ? 'OFF' : 'ON'}`, W / 2, 450, 24, 3, titleActs[3]);
-  button(`ANNOUNCER: ${voiceOn ? 'ON' : 'OFF'}`, W / 2, 480, 24, 4, titleActs[4]);
+  button('2 PLAYERS', W / 2, 400, 30, 2, titleActs[2]);
+  button('PLAY A FRIEND', W / 2, 438, 30, 3, titleActs[3]);
+  button(`SOUND: ${muted ? 'OFF' : 'ON'}`, W / 2 - 112, 480, 22, 4, titleActs[4]);
+  button(`ANNOUNCER: ${voiceOn ? 'ON' : 'OFF'}`, W / 2 + 110, 480, 22, 5, titleActs[5]);
   if (!TOUCH) txt('P1: A/D MOVE · W JUMP · S DIVE      P2: ARROW KEYS      P PAUSE · M MUTE', W / 2, 512, 15, { alpha: 0.7, skew: 0 });
 }
 function drawVs() {
@@ -642,7 +737,7 @@ function render() {
   if (shake > 0.3) { const z = 1 + shake * 0.003; ctx.translate(W / 2 + rnd(-shake, shake) * 0.8, H / 2 + rnd(-shake, shake) * 0.45); ctx.scale(z, z); ctx.translate(-W / 2, -H / 2); }
   drawWorld();
   ctx.restore();
-  if (scene === 'title') drawTitle(); else if (scene === 'vs') drawVs(); else drawOverlays();
+  if (scene === 'room') dim(0.78); else if (scene === 'title') drawTitle(); else if (scene === 'vs') drawVs(); else drawOverlays();
 }
 
 // ---------- input ----------
@@ -661,6 +756,7 @@ function press(k) {
     if (ok && sceneT > 0.4) beginPlay();
     if (esc) toTitle();
   } else if (scene === 'match') {
+    if (mode === 'online') { if (k === 'KeyP' || esc) openRoomMenu(); return; }
     if (k === 'KeyP' || esc) { paused = !paused; menuI = 0; }
     else if (paused) { nav(2); if (ok) { if (menuI) toTitle(); else paused = false; } }
   } else if (scene === 'result') {
@@ -671,13 +767,13 @@ function press(k) {
   }
 }
 addEventListener('keydown', e => {
-  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (!panel.hidden || e.metaKey || e.ctrlKey || e.altKey) return;
   if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) e.preventDefault();
   if (!e.repeat) press(e.code);
   keys[e.code] = true;
 });
 addEventListener('keyup', e => { keys[e.code] = false; });
-addEventListener('blur', () => { for (const k in keys) keys[k] = false; if (scene === 'match') paused = true; });
+addEventListener('blur', () => { clearInput(); if (scene === 'match' && mode !== 'online') paused = true; });
 cv.addEventListener('pointerdown', e => {
   if (e.pointerType === 'touch') e.preventDefault();
   audio();
@@ -742,7 +838,7 @@ function releaseControls() { releaseStick(); releaseJump(); }
 // selection on the court as well as on the two-thumb controls.
 for (const type of ['touchstart', 'contextmenu', 'selectstart', 'dragstart']) {
   document.body.addEventListener(type, e => {
-    if (e.cancelable) e.preventDefault();
+    if (e.cancelable && !panel.contains(e.target)) e.preventDefault();
   }, { passive: false });
 }
 addEventListener('blur', releaseControls);
@@ -764,11 +860,22 @@ function fitCanvas() {
 new ResizeObserver(fitCanvas).observe(cv);
 fitCanvas();
 startDemo();
+function checkInvitation() {
+  const id = roomFromLink();
+  if (!id && !new URLSearchParams(location.hash.slice(1)).has('room')) return;
+  scene = 'room';
+  if (!id) { lobby.show('Play a friend', 'This invite is invalid.'); return; }
+  const returning = hasRoomSeat(id);
+  lobby.show('Play a friend', returning ? 'Your seat is saved.' : 'Join your friend on the court.',
+    returning ? 'Rejoin match' : 'Join match', () => enterRoom(id));
+}
+checkInvitation();
+addEventListener('hashchange', () => { if (!room) checkInvitation(); });
 let last = performance.now();
 function frame(now) {
   const dt = Math.min((now - last) / 1000, 0.05); last = now;
   update(dt);
-  const showPad = TOUCH && scene === 'match' && !paused;
+  const showPad = TOUCH && scene === 'match' && !paused && panel.hidden;
   if (pad.hidden === showPad) {
     pad.hidden = !showPad;
     if (!showPad) releaseControls();
